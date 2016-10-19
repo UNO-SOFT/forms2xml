@@ -4,5 +4,7 @@ export ORACLE_HOME=/oracle/mw11gR1/fr11gR2
 export LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH
 CLASSPATH=$CLASSPATH:classes:$ORACLE_HOME/jlib/frmjdapi.jar:$ORACLE_HOME/jlib/frmxmltools.jar:$ORACLE_HOME/lib/xmlparserv2.jar
 set -x
-javac -cp $CLASSPATH -d classes src/unosoft/forms/Serve.java
+if ! [ "${NOCOMPILE:-0}" -eq 1 ]; then
+	javac -cp $CLASSPATH -d classes src/unosoft/forms/Serve.java
+fi
 java -cp $CLASSPATH unosoft.forms.Serve "$@"
