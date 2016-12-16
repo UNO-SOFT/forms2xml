@@ -12,6 +12,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 
+import oracle.forms.jdapi.Jdapi;
 import oracle.forms.jdapi.JdapiModule;
 import oracle.forms.util.xmltools.Forms2XML;
 
@@ -26,6 +27,9 @@ public class Serve {
 		String formsPath = System.getenv().get("BRUNO_HOME");
 		if( formsPath.isEmpty() ) {
 			formsPath = System.getenv().get("ABLAK_HOME");
+			Jdapi.connectToDatabase(System.getenv().get("ABLAK_ID"));
+		} else {
+			Jdapi.connectToDatabase(System.getenv().get("BRUNO_ID"));
 		}
 		formsPath += "/../lib";
 		System.out.println("formsPath="+formsPath);
@@ -62,6 +66,9 @@ public class Serve {
 
 	public void Start() {
 		System.out.println("Start listening on "+this.addr);
+		// http://www.dbadvice.be/oracle-forms-java-api-jdapi/
+		Jdapi.setFailLibraryLoad(false);
+		Jdapi.setFailSubclassLoad(false);
         this.server.start();
     }
 
@@ -93,7 +100,7 @@ public class Serve {
 			File src = File.createTempFile("forms2xml-", ext);
 			try {
 				long n = Serve.Copy(new FileOutputStream(src), t.getRequestBody());
-				System.out.println("Read "+n+" bytes into "+src.getName()+".");
+				System.out.println("Read "+n+" bytes into "+src.toString()+".");
 
 				if( !fromXML ) {
 					// fmb -> XML
@@ -102,7 +109,8 @@ public class Serve {
 						xml = (new Forms2XML(src)).dumpModule();
 					} catch(Exception e) {
 						t.getResponseHeaders().set("Content-Type", "text/plain");
-						byte[] response = ("ERROR: "+e.toString()).getBytes();
+						byte[] response = ("ERROR with "+src+": "+e.toString()).getBytes();
+						System.out.write(response);
 						t.sendResponseHeaders(500, response.length);
 						os.write(response);
 						return;
