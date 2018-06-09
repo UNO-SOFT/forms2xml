@@ -14,6 +14,7 @@ import com.sun.net.httpserver.HttpServer;
 
 import oracle.forms.jdapi.JdapiModule;
 import oracle.forms.util.xmltools.Forms2XML;
+import oracle.forms.util.xmltools.XML2Forms;
 
 public class Serve {
 	private InetSocketAddress addr = null;
@@ -70,6 +71,11 @@ public class Serve {
 
 		public ConvertHandler(String formsPath ) {
 			this.formsPath = formsPath;
+			try {
+				new Forms2XML(new File(""));
+				new XML2Forms(null);
+			} catch(Exception e) {
+			}
 		}
 
         @Override
@@ -116,7 +122,7 @@ public class Serve {
 				// XML -> fmb
 				try {
 					JdapiModule fmb = (new
-							oracle.forms.util.xmltools.XML2Forms(new java.net.URL("file://"+src.getAbsolutePath()))).createModule();
+							XML2Forms(new java.net.URL("file://"+src.getAbsolutePath()))).createModule();
 					File dst = File.createTempFile("fmb2xml-", ".fmb");
 					try {
 						fmb.save(dst.getAbsolutePath());
