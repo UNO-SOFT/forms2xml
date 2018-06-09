@@ -1,6 +1,0 @@
-#!/bin/sh
-ORACLE_HOME=/oracle/mw11gR1/fr11gR2
-set -x
-exec env LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH \
-	java -cp $ORACLE_HOME/jlib/frmjdapi.jar:$ORACLE_HOME/jlib/frmxmltools.jar:$ORACLE_HOME/lib/xmlparserv2.jar \
-	oracle.forms.util.xmltools.Forms2XML "$@"

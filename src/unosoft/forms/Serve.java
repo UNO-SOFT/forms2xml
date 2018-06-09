@@ -68,9 +68,9 @@ public class Serve {
     public static long Copy(OutputStream os, InputStream is) throws java.io.IOException {
         byte[] b = new byte[65536];
         long n = 0;
-        for (int i = is.read(b); i > 0; i = is.read(b)) {
-            os.write(b, 0, i);
-            n += i;
+        for (int i = is.read(b); i >= 0; i = is.read(b)) {
+			os.write(b, 0, i);
+			n += i;
         }
         return n;
     }
@@ -88,11 +88,14 @@ public class Serve {
 
 		public ConvertHandler(String formsPath ) {
 			this.formsPath = formsPath;
+			System.out.println("initialize");
 			try {
-				new Forms2XML(new File(""));
+				new Forms2XML(new File("empty.fmb"));
 				new XML2Forms(null);
 			} catch(Exception e) {
+				System.out.println(e.toString());
 			}
+			System.out.println("initialized");
 		}
 
         @Override
@@ -115,7 +118,9 @@ public class Serve {
 
 			File src = File.createTempFile("forms2xml-", ext);
 			try {
-				long n = Serve.Copy(new FileOutputStream(src), t.getRequestBody());
+				FileOutputStream fos = new FileOutputStream(src);
+				long n = Serve.Copy(fos, t.getRequestBody());
+				fos.close();
 				System.out.println("Read "+n+" bytes into "+src.getName()+".");
 
 				if( !fromXML ) {
@@ -141,6 +146,8 @@ public class Serve {
 					JdapiModule fmb = (new
 							XML2Forms(new java.net.URL("file://"+src.getAbsolutePath()))).createModule();
 					File dst = File.createTempFile("fmb2xml-", ".fmb");
+					t.getResponseHeaders().set("Content-Type", "application/x-oracle-forms");
+					t.sendResponseHeaders(200, 0);
 					try {
 						fmb.save(dst.getAbsolutePath());
 						n = Serve.Copy(os, new FileInputStream(dst));
