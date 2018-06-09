@@ -21,7 +21,9 @@ export TMUX="/tmp/tmux-1005/default,22421,0"
 CLASSPATH=$CLASSPATH:classes:$ORACLE_HOME/jlib/frmjdapi.jar:$ORACLE_HOME/jlib/frmxmltools.jar:$ORACLE_HOME/lib/xmlparserv2.jar
 set -x
 if ! [ "${NOCOMPILE:-0}" -eq 1 ]; then
+	mkdir -p classes
 	javac -cp $CLASSPATH -d classes src/unosoft/forms/Serve.java
 fi
 export -p
-exec java -cp $CLASSPATH unosoft.forms.Serve "$@"
+exec env LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH \
+	java -cp $CLASSPATH  unosoft.forms.Serve "$@"

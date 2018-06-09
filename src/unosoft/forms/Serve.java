@@ -1,73 +1,90 @@
 package unosoft.forms;
 
-import java.io.IOException;
-import java.io.OutputStream;
 import java.io.File;
 import java.io.InputStream;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.OutputStream;
+import java.io.IOException;
 import java.net.InetSocketAddress;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 
+import oracle.forms.jdapi.Jdapi;
 import oracle.forms.jdapi.JdapiModule;
 import oracle.forms.util.xmltools.Forms2XML;
 import oracle.forms.util.xmltools.XML2Forms;
 
 public class Serve {
-	private InetSocketAddress addr = null;
-	private HttpServer server = null;
+    private InetSocketAddress addr = null;
+    private HttpServer server = null;
 
-	public Serve(InetSocketAddress addr) throws IOException {
-		this.addr = addr;
+    public Serve(InetSocketAddress addr) throws IOException {
+        this.addr = addr;
         this.server = HttpServer.create(addr, 10);
 
-		String formsPath = System.getenv().get("BRUNO_HOME");
-		if( formsPath.isEmpty() ) {
-			formsPath = System.getenv().get("ABLAK_HOME");
-		}
-		formsPath += "/../lib";
-		System.out.println("formsPath="+formsPath);
+        String formsPath = System.getenv().get("BRUNO_HOME");
+        if (formsPath.isEmpty()) {
+            formsPath = System.getenv().get("ABLAK_HOME");
+            Jdapi.connectToDatabase(System.getenv().get("ABLAK_ID"));
+        } else {
+            Jdapi.connectToDatabase(System.getenv().get("BRUNO_ID"));
+        }
+        formsPath += "/../lib";
+        System.out.println("formsPath=" + formsPath);
 
         server.createContext("/", new ConvertHandler(formsPath));
         server.setExecutor(null); // creates a default executor
-	}
+    }
 
     public static void main(String[] args) throws Exception {
-		String addrS = ":8000";
-		if( args.length > 0) {
-			addrS = args[0];
-		}
-		String portS = addrS;
-		int i = portS.lastIndexOf(':');
-		if( i >= 0 ) {
-			addrS = addrS.substring(0, i);
-			portS = portS.substring(i+1);
-		} else {
-			addrS = "127.0.0.1";
-		}
-		if( addrS.length() == 0 ) {
-			addrS = "127.0.0.1";
-		}
-		int port = 8000;
-		try {
-			port = Integer.parseInt(portS);
-		} catch(NumberFormatException e) {
-			System.err.println(e);
-			System.exit(1);
-		}
-		(new Serve(new InetSocketAddress(addrS, port))).Start();
-	}
+        String addrS = ":8000";
+        if (args.length > 0) {
+            addrS = args[0];
+        }
+        String portS = addrS;
+        int i = portS.lastIndexOf(':');
+        if (i >= 0) {
+            addrS = addrS.substring(0, i);
+            portS = portS.substring(i + 1);
+        } else {
+            addrS = "127.0.0.1";
+        }
+        if (addrS.length() == 0) {
+            addrS = "127.0.0.1";
+        }
+        int port = 8000;
+        try {
+            port = Integer.parseInt(portS);
+        } catch (NumberFormatException e) {
+            System.err.println(e);
+            System.exit(1);
+        }
+        (new Serve(new InetSocketAddress(addrS, port))).Start();
+    }
 
-	public void Start() {
-		System.out.println("Start listening on "+this.addr);
+    public static long Copy(OutputStream os, InputStream is) throws java.io.IOException {
+        byte[] b = new byte[65536];
+        long n = 0;
+        for (int i = is.read(b); i > 0; i = is.read(b)) {
+            os.write(b, 0, i);
+            n += i;
+        }
+        return n;
+    }
+
+    public void Start() {
+        System.out.println("Start listening on " + this.addr);
+        // http://www.dbadvice.be/oracle-forms-java-api-jdapi/
+        Jdapi.setFailLibraryLoad(false);
+        Jdapi.setFailSubclassLoad(false);
         this.server.start();
     }
 
     class ConvertHandler implements HttpHandler {
-		String formsPath = null;
+        String formsPath = null;
 
 		public ConvertHandler(String formsPath ) {
 			this.formsPath = formsPath;
@@ -144,15 +161,5 @@ public class Serve {
 			}
         }
     }
-
-	public static long Copy(OutputStream os, InputStream is) throws java.io.IOException {
-		byte[] b = new byte[65536];
-		long n = 0;
-		for( int i = is.read(b); i > 0; i = is.read(b) ) {
-			os.write(b, 0, i);
-			n += i;
-		}
-		return n;
-	}
 
 }
