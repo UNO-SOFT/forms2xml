@@ -18,6 +18,7 @@ package transform
 import (
 	"encoding/xml"
 	"io"
+	"reflect"
 )
 
 const DefaultCellWidth, DefaultCellHeight = 12, 24
@@ -38,9 +39,10 @@ type Module struct {
 	FormModule FormModule
 }
 type FormModule struct {
-	Name             string     `xml:"Name,attr"`
-	Attributes       []xml.Attr `xml:",any,attr"`
-	Coordinate       Coordinate
+	Name             string            `xml:"Name,attr"`
+	ConsoleWindow    stirng            `xml:",attr"`
+	Attributes       []xml.Attr        `xml:",any,attr"`
+	Coordinate       []Coordinate      `xml:"Coordinate"`
 	Alerts           []Alert           `xml:"Alert"`
 	Blocks           []Block           `xml:"Block"`
 	Canvases         []Canvas          `xml:"Canvas"`
@@ -127,6 +129,11 @@ type Trigger struct {
 type Canvas struct {
 	Name                string     `xml:",attr,omitempty"`
 	CanvasType          string     `xml:",attr,omitempty"`
+	ParentType          string     `xml:",attr,omitempty"`
+	ParentName          string     `xml:",attr,omitempty"`
+	ParentModule        string     `xml:",attr,omitempty"`
+	ParentFilename      string     `xml:",attr,omitempty"`
+	ParentModuleType    string     `xml:",attr,omitempty"`
 	VisualAttributeName string     `xml:",attr,omitempty"`
 	Width               string     `xml:",attr,omitempty"`
 	WindowName          string     `xml:",attr,omitempty"`
@@ -279,45 +286,8 @@ func (P *FormsXMLProcessor) Parse(dec *xml.Decoder) error {
 	return err
 }
 
-func (P *FormsXMLProcessor) Process() error {
-	return nil
-}
-func (P *FormsXMLProcessor) Write(w io.Writer) error {
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	return enc.Encode(P.Module)
-}
-
 /*
-    def write(self, tgt):
-        assert self.dom is not None
-        if not hasattr(tgt, 'write'): tgt = file(tgt, 'w+')
-        self.dom.writexml(tgt)
-
-    def parse(self):
-        self.dom = parsexml(self.fn)
-        self.module = self.dom.documentElement.getElementsByTagName('FormModule')[0]
-        self.module_name = self.module.getAttribute('Name')
-        self.module_version = self.module.getAttribute('RuntimeComp')
-        # print self.module_name
-        return self.dom
-
-    def run(self):
-        if not self.dom: self.parse()
-        self._removeExcess(self.module)
-        self._canvasStacked(self.module)
-        self._coordinate(self.module)
-        self._traverse(self.module)
-        self._missingVAs(self.module)
-        self._ensureParameters(self.module)
-
-    def _removeExcess(self, doc):
-        u'''Törli a felesleges elemeket'''
-        for node in doc.getElementsByTagName('Alert'):
-            if node.getAttribute('Name') in ('KERDEZ_ALERT', 'UZEN_ALERT'):
-                doc.removeChild(node)
-
-    # TODO: !
+	# TODO: !
     # 1. Form.Physical.Coordinate System nél a systemet pixel-re
     # 					a width-et 12 -re
     # 					a height-et 24 -ra álltíani
@@ -340,32 +310,82 @@ func (P *FormsXMLProcessor) Write(w io.Writer) error {
     # palette-en :
     # Physical.Bevel : Lowered re
     # Physical.Rendered YES -re
+*/
 
-    c_stacked_canvas_d = {'ParentType': '4', 'ParentName': 'C_STCK_CONTENT',
-        'ParentModule': 'BR_FLIB', 'VisualAttributeName': 'NORMAL',
-        'ParentFilename': 'BR_FLIB.fmb', 'ParentModuleType': '12'}
-    def _canvasStacked(self, doc):
-        u'''stacked canvas -> C_CONTENT'''
-        for node in doc.getElementsByTagName('Canvas'):
-            if 'Stacked' == node.getAttribute('CanvasType'):
-                for k, v in self.c_stacked_canvas_d.iteritems():
-                    node.setAttribute(k, v)
-            # minden inherited
-            removable = (set(self._attr_names(node))
-                - (set(self.c_stacked_canvas_d.iterkeys()) | set(['Name'])))
-            # print removable
-            for k in removable:
-                node.removeAttribute(k)
+func (P *FormsXMLProcessor) Process() error {
+	P.removeExcess()
+	P.fixStackedCanvas()
+	P.coordinate(self.module)
+	P.traverse(self.module)
+	P.missingVAs(self.module)
+	P.ensureParameters(self.module)
+	return nil
+}
 
-    c_coordinate_d = {'CharacterCellWidth': '9',
-        'CharacterCellHeight': '18',
-        'CoordinateSystem': 'Real',
-        'RealUnit': 'Pixel',
-        'DefaultFontScaling': 'false'}
-    def _coordinate(self, doc):
-        self.module.setAttribute('ConsoleWindow', 'W_MAIN')
-        for node in doc.getElementsByTagName("Coordinate"):
-            for k, v in self.c_coordinate_d.iteritems(): node.setAttribute(k, v)
+func (P *FormsXMLProcessor) removeExcess() {
+	// _removeExcess
+	alerts := P.Module.FormModule.Alerts
+	for i := len(alerts) - 1; i >= 0; i-- {
+		switch alerts[i].Name {
+		case "KERDEZ_ALERT", "UZEN_ALERT":
+			alerts = append(alerts[:i], alerts[i+1:]...)
+		}
+	}
+	P.Module.FormModule.Alerts = alerts
+}
+
+var stackedCanvas = Canvas{
+	ParentType: "4", ParentName: "C_STCK_CONTENT", ParentModule: "BR_FLIB",
+	VisualAttributeName: "NORMAL",
+	ParentFilename:      "BR_FLIB.fmb", ParentModuleType: "12",
+}
+
+// stacked canvas -> C_CONTENT
+func (P *FormsXMLProcessor) fixStackedCanvas() {
+	for i, canvas := range P.Module.FormModule.Canvases {
+		c := Canvas{
+			Name:             canvas.Name,
+			ParentType:       canvas.ParentType,
+			ParentName:       canvas.ParentName,
+			ParentModule:     canvas.ParentModule,
+			VisualAttribute:  canvas.VisualAttribute,
+			ParentFilename:   canvas.ParentFilename,
+			ParentModuleType: canvas.ParentModuleType,
+		}
+		if canvas.CanvasType == "Stacked" {
+			c = stackedCanvas
+			c.Name = canvas.Name
+		}
+		c.Graphics = canvas.Graphics
+		c.TabPages = canvas.TabPages
+		// minden inherited
+		P.Module.FormModule.Canvases[i] = c
+	}
+}
+
+func (P *FormsXMLProcessor) Write(w io.Writer) error {
+	enc := xml.NewEncoder(w)
+	enc.Indent("", "  ")
+	return enc.Encode(P.Module)
+}
+
+var coordinate = map[string]string{
+	"CharacterCellWidth":  "9",
+	"CharacterCellHeight": "18",
+	"CoordinateSystem":    "Real",
+	"RealUnit":            "Pixel",
+	"DefaultFontScaling":  "false",
+}
+
+func (P *FormsXMLProcessor) coordinate() {
+	P.Module.FormModule.ConsoleWindow = "W_MAIN"
+	for i, coord := range P.Module.FormModule.Coordinate {
+		setNotZero(&coord, coordinate)
+		P.Module.FormModule.Coordinate[i] = coord
+	}
+}
+
+/*
 
     def _walk(self, elt):
         alist = [elt]
@@ -633,3 +653,14 @@ def process_file(cmd, fn, out_fn, **kwds):
         for x in P.unknown_parents: unknown_parents.add(x)
         P.write(EncodingWriter(tmp_fn))
 */
+
+func setNotZero(dest interface{}, attrs map[string]string) {
+	dv := reflect.ValueOf(dest).Elem()
+	for i := 0; i < dv.NumField(); i++ {
+		v := attrs[dv.Type().Field(i).Name]
+		if v == "" {
+			continue
+		}
+		dv.Field(i).SetString(v)
+	}
+}
