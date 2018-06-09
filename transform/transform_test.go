@@ -12,6 +12,37 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
+func TestProcess(t *testing.T) {
+	fh, err := os.Open(flag.Arg(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fh.Close()
+	var P transform.FormsXMLProcessor
+	var buf strings.Builder
+	var in strings.Builder
+	if err := P.Process(xml.NewEncoder(&buf), xml.NewDecoder(io.TeeReader(fh, &in))); err != nil {
+		t.Fatal(err)
+	}
+	outS := buf.String()
+	t.Log(outS)
+
+	inTokens, err := startElements(strings.NewReader(in.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Log("in:", inTokens)
+	outTokens, err := startElements(strings.NewReader(outS))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Log("out:", outTokens)
+
+	//if diff := cmp.Diff(inTokens, outTokens); diff != "" {
+	//t.Error(diff)
+	//}
+}
+
 func TestParse(t *testing.T) {
 	flag.Parse()
 	var in strings.Builder
@@ -64,23 +95,4 @@ func startElements(r io.Reader) ([]string, error) {
 		}
 	}
 	return ss, nil
-}
-
-func rewriteXML(w io.Writer, r io.Reader) error {
-	dec := xml.NewDecoder(r)
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	for {
-		tok, err := dec.Token()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		if err = enc.EncodeToken(tok); err != nil {
-			return err
-		}
-	}
-	return nil
 }

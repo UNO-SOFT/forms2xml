@@ -18,7 +18,11 @@ package transform
 import (
 	"encoding/xml"
 	"io"
-	"reflect"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/pkg/errors"
 )
 
 const DefaultCellWidth, DefaultCellHeight = 12, 24
@@ -31,6 +35,500 @@ type FormsXMLProcessor struct {
 	UnknownParents        map[string]struct{}
 
 	Module Module
+
+	missingVAs    map[string]struct{}
+	missingParams map[string]struct{}
+
+	seen  []string
+	stack []string
+
+	tbdPromptVAs map[string]struct{}
+	tbdVAs       map[string]struct{}
+}
+
+func (P *FormsXMLProcessor) Process(enc *xml.Encoder, dec *xml.Decoder) error {
+	if P.CellWidth == 0 {
+		P.CellWidth = DefaultCellWidth
+	}
+	if P.CellHeight == 0 {
+		P.CellHeight = DefaultCellHeight
+	}
+	if P.UsedVisualAttributes == nil {
+		P.UsedVisualAttributes = make(map[string]struct{}, len(DefaultUsedVisualAttributes))
+		for _, a := range DefaultUsedVisualAttributes {
+			P.UsedVisualAttributes[a] = struct{}{}
+		}
+	}
+	if P.missingVAs == nil {
+		P.missingVAs = make(map[string]struct{})
+	}
+	if P.missingParams == nil {
+		P.missingParams = make(map[string]struct{})
+		for _, p := range RequiredParams {
+			P.missingParams[p] = struct{}{}
+		}
+	}
+
+	/*
+	   	# TODO: !
+	       # 1. Form.Physical.Coordinate System nél a systemet pixel-re
+	       # 					a width-et 12 -re
+	       # 					a height-et 24 -ra álltíani
+	       #     Form.Functional.Console Window-t W_main-re állítani
+	       # 2. BR_FLIB-ből átmásolni a C_CONTENT-et a Canvases-ba
+	       # 3. A mezőknél a Physical.Canvas-t  átírni C_CONTENT-re
+	       # 4. BR_FLIB-ből a
+	       # NORMAL_ITEM
+	       # SELECT
+	       # NORMAL_PROMPT
+	       # NORMAL
+	       # Visual Attributes-ban lévő atribútumokat áthúzni
+	       # 5. A BLOCK-oknál a Record.Current Record Visual Attribute Group-ot SELECT-re váltani
+	       # 6. A mezőknél a Visual Attributes-ban :
+	       # A Visual Attriburte Group : NORMAL_ITEM r állítani
+	       # A Prompt Visual Attribute Group :  NORMAL_PROMPT ra állítani
+	       # 7. WINDOW-ba inheritálni kell egy csomó attribútumot (miket ?)
+	       # 8. Mező szélesség kb. 10x hossz + 6
+	       # 9. Ha a Canvas-on a mezők kerete nem látszik a mező property
+	       # palette-en :
+	       # Physical.Bevel : Lowered re
+	       # Physical.Rendered YES -re
+	*/
+
+Loop:
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return errors.Wrap(err, "read")
+		}
+		switch st := tok.(type) {
+		case xml.StartElement:
+			P.stack = append(P.stack, st.Name.Local)
+			err = P.processStartElement(enc, &st)
+			P.seen = append(P.seen, strings.Join(P.stack, "/"))
+			if err != nil {
+				if errors.Cause(err) == errSkipElement {
+					dec.Skip()
+					continue Loop
+				}
+				return err
+			}
+		case xml.EndElement:
+			P.stack = P.stack[:len(P.stack)-1]
+		}
+		if err := enc.EncodeToken(tok); err != nil {
+			return errors.Wrap(err, "encode")
+		}
+	}
+	return enc.Flush()
+}
+
+var errSkipElement = errors.New("skip element")
+
+func (P *FormsXMLProcessor) processStartElement(enc *xml.Encoder, st *xml.StartElement) error {
+	if len(P.seen) != 0 && strings.HasSuffix(P.seen[len(P.seen)-1], "/FormModule") {
+		P.attachLibs(enc)
+	}
+	if va := getAttr(st.Attr, "VisualAttribute"); va != "" {
+		P.missingVAs[va] = struct{}{}
+	}
+	switch st.Name.Local {
+	case "VisualAttribute":
+		delete(P.missingVAs, getAttr(st.Attr, "Name"))
+	case "ModuleParameter":
+		delete(P.missingParams, getAttr(st.Attr, "Name"))
+	case "Window":
+		if err := P.addMissingVAs(enc, P.missingVAs); err != nil {
+			return err
+		}
+	}
+	if len(P.missingParams) != 0 {
+		switch st.Name.Local {
+		case "LOV", "ProgramUnit", "PropertyClass", "RecordGroup", "Trigger", "VisualAttribute", "Window":
+			if err := P.addMissingParams(enc, P.missingParams); err != nil {
+				return err
+			}
+			for k := range P.missingParams {
+				delete(P.missingParams, k)
+			}
+		}
+	}
+
+	if err := P.removeExcessAlert(st); err != nil {
+		return err
+	}
+	P.fixStackedCanvas(st)
+	P.fixCoordinate(st)
+
+	P.scaleElt(st)
+	P.fixParentModule(st)
+	P.subclassRootwindow(st)
+	P.fixBadItemType(st)
+	P.trimSpaces(st)
+	P.fixVAs(st)
+	P.fixPromptVAs(st)
+
+	return nil
+}
+
+func (P *FormsXMLProcessor) removeExcessAlert(st *xml.StartElement) error {
+	if st.Name.Local != "Alert" {
+		return nil
+	}
+	switch getAttr(st.Attr, "Name") {
+	case "KERDEZ_ALERT", "UZEN_ALERT":
+		return errSkipElement
+	}
+	return nil
+}
+
+var stackedCanvasAttrs = map[string]string{
+	"ParentType": "4", "ParentName": "C_STCK_CONTENT", "ParentModule": "BR_FLIB",
+	"VisualAttributeName": "NORMAL",
+	"ParentFilename":      "BR_FLIB.fmb", "ParentModuleType": "12",
+}
+
+// stacked canvas -> C_CONTENT
+func (P *FormsXMLProcessor) fixStackedCanvas(st *xml.StartElement) {
+	if st.Name.Local != "Canvas" {
+		return
+	}
+	name := getAttr(st.Attr, "Name")
+	if getAttr(st.Attr, "CanvasType") == "Stacked" {
+		st.Attr = st.Attr[:1]
+		st.Attr[0].Name = xml.Name{Local: "Name"}
+		st.Attr[0].Value = name
+		for k, v := range stackedCanvasAttrs {
+			st.Attr = append(st.Attr, xml.Attr{Name: xml.Name{Local: k}, Value: v})
+		}
+	} else {
+		for i := len(st.Attr) - 1; i >= 0; i-- {
+			a := st.Attr[i]
+			if a.Name.Local == "Name" || stackedCanvasAttrs[a.Name.Local] == "" {
+				continue
+			}
+			st.Attr = append(st.Attr[:i], st.Attr[i+1:]...)
+		}
+	}
+}
+
+var coordinate = map[string]string{
+	"CharacterCellWidth":  "9",
+	"CharacterCellHeight": "18",
+	"CoordinateSystem":    "Real",
+	"RealUnit":            "Pixel",
+	"DefaultFontScaling":  "false",
+}
+
+var DefaultVA = VisualAttribute{
+	ParentModule: "BR_FLIB", ParentModuleType: "12", ParentFilename: "BR_FLIB.fmb",
+	Attributes: []xml.Attr{{Name: xml.Name{Local: "DirtyInfo"}, Value: "true"}},
+}
+
+func (P *FormsXMLProcessor) fixCoordinate(st *xml.StartElement) {
+	if st.Name.Local == "FormModule" {
+		setAttr(st.Attr, "ConsoleWindow", "W_MAIN")
+		return
+	}
+	if st.Name.Local != "Coordinate" {
+		return
+	}
+	st.Attr = setAttrs(st.Attr, coordinate)
+}
+
+// a használt, de nem létező VisualAttribute-okat subclassolja a BR_FLIB-ből
+func (P *FormsXMLProcessor) addMissingVAs(enc *xml.Encoder, missing map[string]struct{}) error {
+	for name := range missing {
+		va := DefaultVA
+		va.Name, va.ParentName = name, name
+		if err := enc.Encode(va); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var RequiredParams = []string{"TORZSSZAM", "PRG_AZON", "BAZON", "DAZON"}
+
+var RequiredParam = ModuleParameter{
+	ParentType: "13", ParentModule: "BR_FLIB", ParentFilename: "BR_FLIB.fmb", ParentModuleType: "12",
+}
+
+// beteszi a 4 kötelező paramétert
+func (P *FormsXMLProcessor) addMissingParams(enc *xml.Encoder, missing map[string]struct{}) error {
+	for name := range missing {
+		param := RequiredParam
+		param.Name, param.ParentName = name, name
+		if err := enc.Encode(param); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (P *FormsXMLProcessor) scaleElt(st *xml.StartElement) {
+	if st.Name.Local == "Coordinate" {
+		return // against double scale
+	}
+	for i, a := range st.Attr {
+		k := a.Name.Local
+		isWidth := strings.HasSuffix(k, "Width")
+		if isWidth || strings.HasSuffix(k, "Position") ||
+			strings.HasSuffix(k, "Height") ||
+			k == "DistanceBetweenRecords" {
+			if val, _ := strconv.Atoi(a.Value); val > 0 {
+				if isWidth || strings.HasSuffix(k, "XPosition") {
+					val *= int(P.CellWidth)
+				} else {
+					val *= int(P.CellHeight)
+				}
+				a.Value = strconv.Itoa(val)
+				st.Attr[i] = a
+			}
+		}
+	}
+}
+
+type Subclass struct {
+	ParentModule, ParentFilename string
+}
+
+var ParentModules = map[string]Subclass{
+	"G_LIB":   Subclass{ParentModule: "BR_FLIB", ParentFilename: "BR_FLIB.fmb"},
+	"CIM_LIB": Subclass{ParentModule: "BR_CIM_LIB", ParentFilename: "BR_CIM_LIB.fmb"},
+}
+
+func (P *FormsXMLProcessor) fixParentModule(st *xml.StartElement) {
+	module := getAttr(st.Attr, "ParentModule")
+	if pm, ok := ParentModules[module]; ok {
+		setAttr(st.Attr, "ParentModule", pm.ParentModule)
+		setAttr(st.Attr, "ParentFilename", pm.ParentFilename)
+	}
+}
+
+var RootwindowSet = map[string]string{
+	"ParentModule":        "BR_FLIB",
+	"ParentName":          "W_MAIN",
+	"ParentFilename":      "BR_FLIB.fmb",
+	"ParentModuleType":    "12",
+	"VisualAttributeName": "NORMAL",
+	"Name":                "W_MAIN",
+}
+var RootwindowDel = []string{
+	"Height", "Width", "WindowStyle", "CloseAllowed",
+	"MoveAllowed", "ResizeAllowed", "MinimizeAllowed",
+	"InheritMenu", "Bevel", "FontName", "FontSize",
+	"FontWeight", "FontStyle", "FontSpacing",
+}
+
+func (P *FormsXMLProcessor) subclassRootwindow(st *xml.StartElement) {
+	if i := findAttr(st.Attr, "WindowName"); i >= 0 && st.Attr[i].Value == "ROOT_WINDOW" {
+		st.Attr[i].Value = "W_MAIN"
+	}
+
+	if st.Name.Local != "Window" || getAttr(st.Attr, "Name") != "ROOT_WINDOW" {
+		return
+	}
+	m := make(map[string]struct{}, len(RootwindowDel))
+	for _, d := range RootwindowDel {
+		m[d] = struct{}{}
+	}
+	for i := len(st.Attr) - 1; i >= 0; i-- {
+		k := st.Attr[i].Name.Local
+		if _, ok := m[k]; ok {
+			st.Attr = append(st.Attr[:i], st.Attr[i+1:]...)
+		}
+	}
+	setAttrs(st.Attr, RootwindowSet)
+}
+
+var RequiredLibs = []string{"BR_PROCEDURE_LIB"}
+
+type AttachedLibrary struct {
+	Name            string `xml:",attr"`
+	LibrarySource   string `xml:",attr,omitempty"`
+	LibraryLocation string `xml:",attr"`
+}
+
+func (P *FormsXMLProcessor) attachLibs(enc *xml.Encoder) error {
+	for _, lib := range RequiredLibs {
+		if err := enc.Encode(AttachedLibrary{
+			LibrarySource: "File", Name: lib, LibraryLocation: lib},
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var BadItemType = map[string]string{"Check Box": "Display Item", "User Area": "Text Item"}
+
+func (P *FormsXMLProcessor) fixBadItemType(st *xml.StartElement) {
+	if st.Name.Local != "Item" {
+		return
+	}
+	if i := findAttr(st.Attr, "ItemType"); i >= 0 {
+		if v := BadItemType[st.Attr[i].Value]; v != "" {
+			st.Attr[i].Value = v
+		}
+	}
+}
+
+var rSpaces = regexp.MustCompile(`\s+&amp;#10;`)
+
+func (P *FormsXMLProcessor) trimSpaces(st *xml.StartElement) {
+	switch st.Name.Local {
+	case "ProgramUnit", "Trigger":
+	default:
+		return
+	}
+	if i := findAttr(st.Attr, st.Name.Local+"Text"); i >= 0 && st.Attr[i].Value != "" {
+		st.Attr[i].Value = rSpaces.ReplaceAllString(st.Attr[i].Value, "&amp;#10;")
+	}
+}
+
+var VisualAttrs = map[string]string{
+	"ParentModule": "BR_FLIB", "ParentModuleType": "12",
+	"ParentFileName": "BR_FLIB.fmb",
+}
+var VAReplace = map[string]struct {
+	Replacement string
+	Names       []string
+}{
+	"ITEM_SELECT": {
+		Replacement: "SELECT",
+		Names:       []string{"RecordVisualAttributeGroupName", "VisualAttributeGroupName"},
+	},
+}
+
+func (P *FormsXMLProcessor) fixVAs(st *xml.StartElement) {
+	for rnev, R := range VAReplace {
+		for _, k := range R.Names {
+			i := findAttr(st.Attr, k)
+			if i < 0 {
+				continue
+			}
+			if st.Attr[i].Value != rnev {
+				continue
+			}
+			if R.Replacement == "" {
+				st.Attr = append(st.Attr[:i], st.Attr[i+1:]...)
+			} else {
+				P.missingVAs[R.Replacement] = struct{}{}
+				st.Attr[i].Value = R.Replacement
+			}
+		}
+	}
+
+	switch st.Name.Local {
+	case "Block":
+		setAttr(st.Attr, "RecordVisualAttributeGroupName", "SELECT")
+
+	case "VisualAttribute":
+		i := findAttr(st.Attr, "Name")
+		rnev := st.Attr[i].Value
+		if R, ok := VAReplace[rnev]; ok {
+			st.Attr[i].Value = R.Replacement
+			setAttr(st.Attr, "ParentName", R.Replacement)
+			P.missingVAs[R.Replacement] = struct{}{}
+		}
+		if i = findAttr(st.Attr, "ParentModule"); i >= 0 && st.Attr[i].Value == "G_LIB" {
+			setAttrs(st.Attr, VisualAttrs)
+		}
+	}
+}
+
+var RemovePromptVAs = []string{
+	"PromptFontName", "PromptFontSize", "PromptFontSpacing",
+	"PromptFontStyle", "PromptFontWeight",
+}
+var RemoveVAs = []string{"FontName", "FontSize", "FontSpacing", "FontStyle", "FontWeight"}
+
+// a PromptVisualAttribute-ot beállítja NORMAL_PROMPT-ra
+func (P *FormsXMLProcessor) fixPromptVAs(st *xml.StartElement) {
+	if i := findAttr(st.Attr, "Prompt"); i >= 0 {
+		if j := findAttr(st.Attr, "PromptVisualAttributeName"); j < 0 || st.Attr[j].Value == "DEFAULT" {
+			if j >= 0 {
+				st.Attr[j].Value = "NORMAL_PROMPT"
+			}
+			if P.tbdPromptVAs == nil {
+				P.tbdPromptVAs = make(map[string]struct{}, len(RemovePromptVAs))
+				for _, k := range RemovePromptVAs {
+					P.tbdPromptVAs[k] = struct{}{}
+				}
+			}
+			delAttrs(st.Attr, P.tbdPromptVAs)
+			P.missingVAs["NORMAL_PROMPT"] = struct{}{}
+		}
+	}
+	if j := findAttr(st.Attr, "VisualAttributeName"); j >= 0 {
+		if P.tbdVAs == nil {
+			P.tbdVAs = make(map[string]struct{}, len(RemoveVAs))
+			for _, k := range RemoveVAs {
+				P.tbdVAs[k] = struct{}{}
+			}
+		}
+		delAttrs(st.Attr, P.tbdVAs)
+	}
+}
+
+func findAttr(attrs []xml.Attr, name string) int {
+	for i, a := range attrs {
+		if a.Name.Local == name {
+			return i
+		}
+	}
+	return -1
+}
+
+func getAttr(attrs []xml.Attr, name string) string {
+	for _, a := range attrs {
+		if a.Name.Local == name {
+			return a.Value
+		}
+	}
+	return ""
+}
+
+func setAttr(attrs []xml.Attr, k, v string) []xml.Attr {
+	for i, a := range attrs {
+		if a.Name.Local == k {
+			a.Value = v
+			attrs[i] = a
+			return attrs
+		}
+	}
+	return append(attrs, xml.Attr{Name: xml.Name{Local: k}, Value: v})
+}
+
+func setAttrs(attrs []xml.Attr, m map[string]string) []xml.Attr {
+	seen := make(map[string]struct{})
+	for i, a := range attrs {
+		if v := m[a.Name.Local]; v != "" {
+			a.Value = v
+			attrs[i] = a
+			seen[a.Name.Local] = struct{}{}
+		}
+	}
+	for k, v := range m {
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		attrs = append(attrs, xml.Attr{Name: xml.Name{Local: k}, Value: v})
+	}
+	return attrs
+}
+func delAttrs(attrs []xml.Attr, m map[string]struct{}) []xml.Attr {
+	for i := len(attrs) - 1; i >= 0; i-- {
+		a := attrs[i]
+		if _, ok := m[a.Name.Local]; ok {
+			attrs = append(attrs[:i], attrs[i+1:]...)
+		}
+	}
+	return attrs
 }
 
 type Module struct {
@@ -40,7 +538,7 @@ type Module struct {
 }
 type FormModule struct {
 	Name             string            `xml:"Name,attr"`
-	ConsoleWindow    stirng            `xml:",attr"`
+	ConsoleWindow    string            `xml:",attr"`
 	Attributes       []xml.Attr        `xml:",any,attr"`
 	Coordinate       []Coordinate      `xml:"Coordinate"`
 	Alerts           []Alert           `xml:"Alert"`
@@ -193,6 +691,7 @@ type Graphics struct {
 
 type ModuleParameter struct {
 	Name             string     `xml:",attr,omitempty"`
+	ParentType       string     `xml:",attr,omitempty"`
 	ParentModule     string     `xml:",attr,omitempty"`
 	ParentModuleType string     `xml:",attr,omitempty"`
 	ParentName       string     `xml:",attr,omitempty"`
@@ -312,355 +811,8 @@ func (P *FormsXMLProcessor) Parse(dec *xml.Decoder) error {
     # Physical.Rendered YES -re
 */
 
-func (P *FormsXMLProcessor) Process() error {
-	P.removeExcess()
-	P.fixStackedCanvas()
-	P.coordinate(self.module)
-	P.traverse(self.module)
-	P.missingVAs(self.module)
-	P.ensureParameters(self.module)
-	return nil
-}
-
-func (P *FormsXMLProcessor) removeExcess() {
-	// _removeExcess
-	alerts := P.Module.FormModule.Alerts
-	for i := len(alerts) - 1; i >= 0; i-- {
-		switch alerts[i].Name {
-		case "KERDEZ_ALERT", "UZEN_ALERT":
-			alerts = append(alerts[:i], alerts[i+1:]...)
-		}
-	}
-	P.Module.FormModule.Alerts = alerts
-}
-
-var stackedCanvas = Canvas{
-	ParentType: "4", ParentName: "C_STCK_CONTENT", ParentModule: "BR_FLIB",
-	VisualAttributeName: "NORMAL",
-	ParentFilename:      "BR_FLIB.fmb", ParentModuleType: "12",
-}
-
-// stacked canvas -> C_CONTENT
-func (P *FormsXMLProcessor) fixStackedCanvas() {
-	for i, canvas := range P.Module.FormModule.Canvases {
-		c := Canvas{
-			Name:             canvas.Name,
-			ParentType:       canvas.ParentType,
-			ParentName:       canvas.ParentName,
-			ParentModule:     canvas.ParentModule,
-			VisualAttribute:  canvas.VisualAttribute,
-			ParentFilename:   canvas.ParentFilename,
-			ParentModuleType: canvas.ParentModuleType,
-		}
-		if canvas.CanvasType == "Stacked" {
-			c = stackedCanvas
-			c.Name = canvas.Name
-		}
-		c.Graphics = canvas.Graphics
-		c.TabPages = canvas.TabPages
-		// minden inherited
-		P.Module.FormModule.Canvases[i] = c
-	}
-}
-
 func (P *FormsXMLProcessor) Write(w io.Writer) error {
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	return enc.Encode(P.Module)
-}
-
-var coordinate = map[string]string{
-	"CharacterCellWidth":  "9",
-	"CharacterCellHeight": "18",
-	"CoordinateSystem":    "Real",
-	"RealUnit":            "Pixel",
-	"DefaultFontScaling":  "false",
-}
-
-func (P *FormsXMLProcessor) coordinate() {
-	P.Module.FormModule.ConsoleWindow = "W_MAIN"
-	for i, coord := range P.Module.FormModule.Coordinate {
-		setNotZero(&coord, coordinate)
-		P.Module.FormModule.Coordinate[i] = coord
-	}
-}
-
-/*
-
-    def _walk(self, elt):
-        alist = [elt]
-        while alist:
-            elt = alist.pop()
-            yield elt
-            if elt.hasChildNodes(): alist = list(elt.childNodes) + alist
-            # print [(hasattr(x, 'tagName') and [x.tagName] or [x.data])[0] for x in alist]
-            #DFS
-
-    def _traverse(self, elt):
-        for node in self._walk(elt):
-            if not node.nodeType == node.ELEMENT_NODE:
-                continue
-            # print node.nodeType, node.nodeName, node.nodeValue
-            self._scaleElt(node, self.c_cell_width, self.c_cell_height)
-            self._subclassingElt(node)
-            self._rootwindowElt(node)
-            self._attachLibsElt(node)
-            #LOG.debug("module_version: %r" % self.module_version)
-            if self.module_version >= '4.5':
-                self._badItemType(node)
-            self._trimSpaces(node)
-            self._visualAttributeElt(node)
-            self._promptVAElt(node)
-
-    def _attr_names(self, elt):
-        for i in xrange(0, elt.attributes.length):
-            yield elt.attributes.item(i).name
-
-    def _scaleElt(self, elt, width, height):
-        if elt.tagName == 'Coordinate': return # dupla szorzás ellen
-        for key in self._attr_names(elt):
-            # print elt.nodeName
-            if (key.endswith("Position") or key.endswith("Width")
-                    or key.endswith("Height") or "DistanceBetweenRecords" == key):
-                # print '_scaleElt', elt.nodeName
-                val = -1
-                try: val = int(elt.getAttribute(key))
-                except ValueError: pass
-                if val > 0:
-                    if key.endswith("Width") or key.endswith("XPosition"):
-                        val *= width
-                    else: val *= height
-                    #System.out.println(key + ": " + attr.getValue() + " -> " + val);
-                    elt.setAttribute(key, str(val))
-
-    c_sc_parent_type_d = {'Trigger': '37', 'Window': '41',
-            'VisualAttribute': '39',
-        }
-    def _sc_set_parent_type(self, elt):
-        if self.c_sc_parent_type_d.has_key(elt.tagName):
-            elt.setAttribute('ParentType', self.c_sc_parent_type_d[elt.tagName])
-
-    c_sc_d = {
-        'G_LIB': {
-            'ParentModule': "BR_FLIB",
-            'ParentFilename': "BR_FLIB.fmb"},
-        'CIM_LIB': {
-            'ParentModule': "BR_CIM_LIB",
-            'ParentFilename': "BR_CIM_LIB.fmb"},
-         }
-    def _subclassingElt(self, elt):
-        if elt.hasAttribute("ParentModule"):
-            module = elt.getAttribute("ParentModule")
-            if (not self.module_name == module
-                    and self.c_sc_d.has_key(module)):
-                for k, v in self.c_sc_d[module].iteritems():
-                    # print '%s.%s = %s -> %s' % (module, k, elt.getAttribute(k), v)
-                    elt.setAttribute(k, v)
-                self._sc_set_parent_type(elt)
-
-            elif not (self.module_name == module
-                                or self.c_sc_d.has_key(module)):
-                self.unknown_parents.add(module)
-        # else: print list(self._attr_names(elt))
-
-    c_rootwindow_d = {"ParentModule": "BR_FLIB",
-        "ParentName": "W_MAIN",
-        "ParentFilename": "BR_FLIB.fmb",
-        "ParentModuleType": "12",
-        'VisualAttributeName': 'NORMAL',
-        "Name": "W_MAIN"}
-    c_rootwindow_del = ('Height', 'Width', 'WindowStyle', 'CloseAllowed',
-                                            'MoveAllowed', 'ResizeAllowed', 'MinimizeAllowed',
-                                            'InheritMenu', 'Bevel', 'FontName', 'FontSize',
-                                            'FontWeight', 'FontStyle', 'FontSpacing')
-    ##
-    #  a ROOT_WINDOW-t subclass-olja a W_main-ről
-    def _rootwindowElt(self, elt):
-        # ROOT_WINDOW -> W_MAIN
-        if "Window" == elt.tagName and "ROOT_WINDOW" == elt.getAttribute("Name"):
-            self._sc_set_parent_type(elt)
-            for k, v in self.c_rootwindow_d.iteritems(): elt.setAttribute(k, v)
-            for k in self.c_rootwindow_del:
-                if elt.hasAttribute(k): elt.removeAttribute(k)
-        # ahol hivatkoznak rájuk, ott is
-        for k in ('WindowName',):
-            if elt.hasAttribute(k) and elt.getAttribute(k) == 'ROOT_WINDOW':
-                elt.setAttribute(k, 'W_MAIN')
-
-
-    c_attachLibs = set(['BR_PROCEDURE_LIB',])
-    def _attachLibsElt(self, elt):
-        if 'FormModule' == elt.tagName:
-            if len(elt.getElementsByTagName("AttachedLibrary")) == 0:
-                #hova tegyük
-                ele = None
-                for e in elt.childNodes:
-                    if not e.nodeType == e.ELEMENT_NODE:
-                        continue
-                    # print e, e.nodeName
-                    if 'Block' == e.tagName:
-                        ele = e
-                        break
-                if not ele: return
-                #ha nincs
-                for lib_name in self.c_attachLibs:
-                    uj = self.dom.createElement("AttachedLibrary")
-                    uj.setAttribute('LibrarySource', 'File')
-                    for k in ('Name', 'LibraryLocation'):
-                        uj.setAttribute(k, lib_name)
-                elt.insertBefore(uj, ele)
-
-    c_badItemType = {'Check Box': 'Display Item', 'User Area': 'Text Item'}
-    def _badItemType(self, elt):
-        if 'Item' == elt.tagName:
-            k = elt.getAttribute('ItemType')
-            if k in self.c_badItemType:
-                elt.setAttribute('ItemType', self.c_badItemType[k])
-
-    r_spaces = re.compile(r'\s+&amp;#10;')
-    def _trimSpaces(self, elt):
-        if elt.tagName in ('ProgramUnit', 'Trigger'):
-            k = elt.tagName + 'Text'
-            v = elt.getAttribute(k)
-            if v:
-                elt.setAttribute(k, self.r_spaces.sub('&amp;#10;', v))
-
-    c_visualAttribs_d = {'ParentModule': 'BR_FLIB', 'ParentModuleType': '12',
-            'ParentFileName': 'BR_FLIB.fmb'}
-    c_VAs2replace_d = {
-        'ITEM_SELECT': ('SELECT', set(['RecordVisualAttributeGroupName',
-                                                                     'VisualAttributeGroupName'])),}
-    def _visualAttributeElt(self, elt):
-        # használt VA-k
-        for rnev, (unev, elt_names) in self.c_VAs2replace_d.iteritems():
-            for k in elt_names:
-                if elt.hasAttribute(k) and elt.getAttribute(k) == rnev:
-                    print elt.getAttribute('Name'), k, rnev, '->', unev
-                    if unev is None: elt.removeAttribute(k)
-                    else:
-                        self.visual_attributes['used'].add(unev)
-                        elt.setAttribute(k, unev)
-        if 'Block' == elt.tagName:
-            elt.setAttribute('RecordVisualAttributeGroupName', 'SELECT')
-        # subclassing
-        if 'VisualAttribute' == elt.tagName:
-            rnev = elt.getAttribute('Name')
-            if self.c_VAs2replace_d.has_key(rnev):
-                unev = self.c_VAs2replace_d[rnev][0]
-                elt.setAttribute('Name', unev)
-                # más a subclassing név!!!
-                elt.setAttribute('ParentName', unev)
-            self.visual_attributes['exists'].add(unev)
-            self._sc_set_parent_type(elt)
-            if elt.getAttribute('ParentModule') == 'G_LIB':
-                for k, v in self.c_visualAttribs_d.iteritems(): elt.setAttribute(k, v)
-
-    def _missingVAs(self, elt):
-        u'''a használt, de nem létező VisualAttribute-okat subclassolja a BR_FLIB-ből'''
-        # print 'used:', self.visual_attributes['used'], '\nexists:', self.visual_attributes['exists']
-        needed = self.visual_attributes['used'] - self.visual_attributes['exists']
-        # print 'MissingVAs:', self.visual_attributes['used'], self.visual_attributes['exists'], needed
-        if needed:
-            # print elt.getElementsByTagName('Window')
-            before = elt.getElementsByTagName('Window')[0]
-            # print 'before =', before
-            if not before: return
-            for name in needed:
-                uj = self.dom.createElement('VisualAttribute')
-                for k, v in {'Name': name, 'ParentName': name, 'DirtyInfo': 'true'}.iteritems():
-                    uj.setAttribute(k, v)
-                self._sc_set_parent_type(uj)
-                for k, v in self.c_visualAttribs_d.iteritems():
-                    if k != 'ParentFileName':
-                        uj.setAttribute(k, v)
-                # print uj.toprettyxml()
-                elt.insertBefore(uj, before)
-
-    def _promptVAElt(self, elt):
-        u'''a PromptVisualAttribute-ot beállítja NORMAL_PROMPT-ra'''
-        if elt.hasAttribute('Prompt'):
-            if (not elt.hasAttribute('PromptVisualAttributeName')
-                    or 'DEFAULT' == elt.getAttribute('PromptVisualAttributeName')):
-                elt.setAttribute('PromptVisualAttributeName', 'NORMAL_PROMPT')
-                # print elt.toprettyxml()
-                for k in ('PromptFontName', 'PromptFontSize', 'PromptFontSpacing',
-                          'PromptFontStyle', 'PromptFontWeight',):
-                    # print k, elt.getAttribute(k)
-                    if elt.hasAttribute(k):
-                        elt.removeAttribute(k)
-                # print elt.toprettyxml()
-                self.visual_attributes['used'].add('NORMAL_PROMPT')
-        if elt.hasAttribute('VisualAttributeName'):
-            for k in ('FontName', 'FontSize', 'FontSpacing', 'FontStyle', 'FontWeight'):
-                if elt.hasAttribute(k): elt.removeAttribute(k)
-
-    c_parameter = {'ParentType': '13', 'ParentModule': 'BR_FLIB',
-                                 'ParentFilename': 'BR_FLIB.fmb', 'ParentModuleType': '12'}
-    c_req_params = ('TORZSSZAM', 'PRG_AZON', 'BAZON', 'DAZON',)
-    def _ensureParameters(self, elt):
-        u'''beteszi a 4 kötelező paramétert'''
-
-        exists = elt.getElementsByTagName('ModuleParameter')
-        needed = set(self.c_req_params) - set(x.getAttribute('Name') for x in exists)
-        # print exists, needed
-        if needed: # Canvas után megy
-            afters = []
-            for nm in ('Canvas', 'Block'):
-                afters = elt.getElementsByTagName(nm)
-                if afters: break
-            nxt = (afters[-1]).nextSibling
-            while nxt.nodeType != nxt.ELEMENT_NODE:
-                # print nxt.nodeName, nxt.nodeType
-                nxt = nxt.nextSibling
-            before = nxt
-            # print 'BEFORE:', before.nodeName, before.nodeType
-            for name in needed:
-                # print name
-                uj = self.dom.createElement('ModuleParameter')
-                for k, v in self.c_parameter.iteritems(): uj.setAttribute(k, v)
-                for k in ('Name', 'ParentName'): uj.setAttribute(k, name)
-                # print uj.toprettyxml()
-                elt.insertBefore(uj, before)
-
-
-def dec(obj, encoding=ENCODING):
-    if isinstance(obj, unicode):
-        return obj
-    elif hasattr(obj, '__unicode__'):
-        return unicode(obj)
-    else:
-        return unicode(obj, encoding)
-
-class EncodingWriter(file):
-    u'''Adott fájlba ír, adott karakterkódolásokat használva'''
-    def __init__(self, fn,
-                             mode='w+b', input_encoding='utf-8', output_encoding='utf-8'):
-        self._sup = super(type(self), self)
-        self._sup.__init__(fn, mode=mode)
-        self.inp_enc = input_encoding
-        self.out_enc = output_encoding
-
-    def write(self, text):
-        if self.inp_enc and not isinstance(text, unicode):
-            text = unicode(text, self.inp_enc)
-        self._sup.write(text.encode(self.out_enc))
-        self.flush()
-
-def process_file(cmd, fn, out_fn, **kwds):
-        P = FormsXmlProcessor(tmp_fn)
-
-        P.run()
-        for x in P.unknown_parents: unknown_parents.add(x)
-        P.write(EncodingWriter(tmp_fn))
-*/
-
-func setNotZero(dest interface{}, attrs map[string]string) {
-	dv := reflect.ValueOf(dest).Elem()
-	for i := 0; i < dv.NumField(); i++ {
-		v := attrs[dv.Type().Field(i).Name]
-		if v == "" {
-			continue
-		}
-		dv.Field(i).SetString(v)
-	}
 }
