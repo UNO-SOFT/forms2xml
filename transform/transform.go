@@ -153,7 +153,7 @@ func (P *FormsXMLProcessor) processStartElement(enc *xml.Encoder, st *xml.StartE
 	}
 	if len(P.missingParams) != 0 {
 		switch st.Name.Local {
-		case "LOV", "ProgramUnit", "PropertyClass", "RecordGroup", "Trigger", "VisualAttribute", "Window":
+		case "LOV", "ProgramUnit", "PropertyClass", "RecordGroup", "VisualAttribute", "Window":
 			if err := P.addMissingParams(enc, P.missingParams); err != nil {
 				return err
 			}
