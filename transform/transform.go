@@ -34,7 +34,7 @@ type FormsXMLProcessor struct {
 	UsedVisualAttributes  map[string]struct{}
 	UnknownParents        map[string]struct{}
 
-	Module Module
+	//Module Module
 
 	missingVAs    map[string]struct{}
 	missingParams map[string]struct{}
@@ -44,6 +44,10 @@ type FormsXMLProcessor struct {
 
 	tbdPromptVAs map[string]struct{}
 	tbdVAs       map[string]struct{}
+}
+
+func (P *FormsXMLProcessor) ProcessStream(w io.Writer, r io.Reader) error {
+	return P.Process(xml.NewEncoder(w), xml.NewDecoder(r))
 }
 
 func (P *FormsXMLProcessor) Process(enc *xml.Encoder, dec *xml.Decoder) error {
@@ -108,6 +112,7 @@ Loop:
 		case xml.StartElement:
 			P.stack = append(P.stack, st.Name.Local)
 			err = P.processStartElement(enc, &st)
+			st.Attr = fixAttrs(st.Attr)
 			P.seen = append(P.seen, strings.Join(P.stack, "/"))
 			if err != nil {
 				if errors.Cause(err) == errSkipElement {
@@ -116,6 +121,7 @@ Loop:
 				}
 				return err
 			}
+			tok = st
 		case xml.EndElement:
 			P.stack = P.stack[:len(P.stack)-1]
 		}
@@ -531,6 +537,40 @@ func delAttrs(attrs []xml.Attr, m map[string]struct{}) []xml.Attr {
 	return attrs
 }
 
+func fixAttrs(attrs []xml.Attr) []xml.Attr {
+	seen := make(map[string]struct{}, len(attrs))
+	for i := len(attrs) - 1; i >= 0; i-- {
+		nm := attrs[i].Name.Local
+		if _, ok := seen[nm]; ok || nm == "xmlns" {
+			attrs = append(attrs[:i], attrs[i+1:]...)
+			continue
+		}
+		seen[nm] = struct{}{}
+	}
+	return attrs
+}
+
+type VisualAttribute struct {
+	Name             string     `xml:",attr,omitempty"`
+	ParentModule     string     `xml:",attr,omitempty"`
+	ParentModuleType string     `xml:",attr,omitempty"`
+	ParentName       string     `xml:",attr,omitempty"`
+	ParentFilename   string     `xml:",attr,omitempty"`
+	ParentType       string     `xml:",attr,omitempty"`
+	Attributes       []xml.Attr `xml:",any,attr"`
+}
+
+type ModuleParameter struct {
+	Name             string     `xml:",attr,omitempty"`
+	ParentType       string     `xml:",attr,omitempty"`
+	ParentModule     string     `xml:",attr,omitempty"`
+	ParentModuleType string     `xml:",attr,omitempty"`
+	ParentName       string     `xml:",attr,omitempty"`
+	ParentFilename   string     `xml:",attr,omitempty"`
+	Attributes       []xml.Attr `xml:",any,attr"`
+}
+
+/*
 type Module struct {
 	Version    string     `xml:"version,attr"`
 	Attributes []xml.Attr `xml:",any,attr"`
@@ -553,7 +593,6 @@ type FormModule struct {
 	VisualAttributes []VisualAttribute `xml:"VisualAttribute"`
 	Windows          []Window          `xml:"Window"`
 }
-
 type Coordinate struct {
 	CharacterCellWidth  string     `xml:",attr,omitempty"`
 	RealUnit            string     `xml:",attr,omitempty"`
@@ -689,16 +728,6 @@ type Graphics struct {
 	Attributes                    []xml.Attr `xml:",any,attr"`
 }
 
-type ModuleParameter struct {
-	Name             string     `xml:",attr,omitempty"`
-	ParentType       string     `xml:",attr,omitempty"`
-	ParentModule     string     `xml:",attr,omitempty"`
-	ParentModuleType string     `xml:",attr,omitempty"`
-	ParentName       string     `xml:",attr,omitempty"`
-	ParentFilename   string     `xml:",attr,omitempty"`
-	Attributes       []xml.Attr `xml:",any,attr"`
-}
-
 type LOV struct {
 	Name                string             `xml:",attr,omitempty"`
 	VisualAttributeName string             `xml:",attr,omitempty"`
@@ -742,16 +771,6 @@ type RecordGroupColumn struct {
 	Attributes []xml.Attr `xml:",any,attr"`
 }
 
-type VisualAttribute struct {
-	Name             string     `xml:",attr,omitempty"`
-	ParentModule     string     `xml:",attr,omitempty"`
-	ParentModuleType string     `xml:",attr,omitempty"`
-	ParentName       string     `xml:",attr,omitempty"`
-	ParentFilename   string     `xml:",attr,omitempty"`
-	ParentType       string     `xml:",attr,omitempty"`
-	Attributes       []xml.Attr `xml:",any,attr"`
-}
-
 type Window struct {
 	Name                string     `xml:",attr,omitempty"`
 	ParentModule        string     `xml:",attr,omitempty"`
@@ -784,6 +803,7 @@ func (P *FormsXMLProcessor) Parse(dec *xml.Decoder) error {
 	err := dec.Decode(&P.Module)
 	return err
 }
+*/
 
 /*
 	# TODO: !
@@ -810,9 +830,3 @@ func (P *FormsXMLProcessor) Parse(dec *xml.Decoder) error {
     # Physical.Bevel : Lowered re
     # Physical.Rendered YES -re
 */
-
-func (P *FormsXMLProcessor) Write(w io.Writer) error {
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	return enc.Encode(P.Module)
-}
