@@ -1,5 +1,6 @@
 #!/bin/sh
 set -e
+cd "$(cd "$(dirname "$0")"; pwd)"
 export ORACLE_BASE=/oracle/mw11gR1
 export ORACLE_HOME=$ORACLE_BASE/fr11gR2
 export LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH
@@ -24,6 +25,8 @@ if ! [ "${NOCOMPILE:-0}" -eq 1 ]; then
 	mkdir -p classes
 	javac -cp $CLASSPATH -d classes src/unosoft/forms/Serve.java
 fi
+export LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH
+set -x
+ldd $ORACLE_HOME/lib/libfrmjapi.so
 export -p
-exec env LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH \
-	java -cp $CLASSPATH  unosoft.forms.Serve "$@"
+exec java -cp "$CLASSPATH" unosoft.forms.Serve "$@"
