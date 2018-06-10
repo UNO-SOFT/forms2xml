@@ -124,7 +124,6 @@ func convertFiles6to11(dst, src string, doTransform bool, suffix string) error {
 	if dst == src {
 		return errors.Wrap(errors.New("overwrite source file"), src)
 	}
-	const mimeType = "application/x-oracle-forms"
 	inp, err := os.Open(src)
 	if err != nil {
 		return err
@@ -167,7 +166,7 @@ func convertFiles6to11(dst, src string, doTransform bool, suffix string) error {
 		xr.CloseWithError(err)
 		return err
 	})
-	err = convert(xw, inp, mimeType)
+	err = convert(xw, inp, "application/x-oracle-forms")
 	log.Printf("fmb->xml: %+v", err)
 	xw.CloseWithError(err)
 	if err != nil {

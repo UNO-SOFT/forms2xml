@@ -16,6 +16,7 @@
 package transform
 
 import (
+	"bytes"
 	"encoding/xml"
 	"io"
 	"regexp"
@@ -47,7 +48,9 @@ type FormsXMLProcessor struct {
 }
 
 func (P *FormsXMLProcessor) ProcessStream(w io.Writer, r io.Reader) error {
-	return P.Process(xml.NewEncoder(w), xml.NewDecoder(r))
+	enc := xml.NewEncoder(w)
+	enc.Indent("", "  ")
+	return P.Process(enc, xml.NewDecoder(r))
 }
 
 func (P *FormsXMLProcessor) Process(enc *xml.Encoder, dec *xml.Decoder) error {
@@ -110,9 +113,11 @@ Loop:
 		}
 		switch st := tok.(type) {
 		case xml.StartElement:
+			st.Name.Space = ""
 			P.stack = append(P.stack, st.Name.Local)
 			err = P.processStartElement(enc, &st)
 			st.Attr = fixAttrs(st.Attr)
+			tok = st
 			P.seen = append(P.seen, strings.Join(P.stack, "/"))
 			if err != nil {
 				if errors.Cause(err) == errSkipElement {
@@ -121,9 +126,13 @@ Loop:
 				}
 				return err
 			}
-			tok = st
 		case xml.EndElement:
+			st.Name.Space = ""
+			tok = st
 			P.stack = P.stack[:len(P.stack)-1]
+		case xml.CharData:
+			st = xml.CharData(bytes.TrimSpace(st))
+			tok = st
 		}
 		if err := enc.EncodeToken(tok); err != nil {
 			return errors.Wrap(err, "encode")
@@ -135,6 +144,7 @@ Loop:
 var errSkipElement = errors.New("skip element")
 
 func (P *FormsXMLProcessor) processStartElement(enc *xml.Encoder, st *xml.StartElement) error {
+	return nil
 	if len(P.seen) != 0 && strings.HasSuffix(P.seen[len(P.seen)-1], "/FormModule") {
 		P.attachLibs(enc)
 	}
@@ -541,7 +551,7 @@ func fixAttrs(attrs []xml.Attr) []xml.Attr {
 	seen := make(map[string]struct{}, len(attrs))
 	for i := len(attrs) - 1; i >= 0; i-- {
 		nm := attrs[i].Name.Local
-		if _, ok := seen[nm]; ok || nm == "xmlns" {
+		if _, ok := seen[nm]; ok {
 			attrs = append(attrs[:i], attrs[i+1:]...)
 			continue
 		}
