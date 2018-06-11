@@ -30,6 +30,7 @@ var jdapiURL = "http://localhost:8008"
 
 func Main() error {
 
+	var concurrency = 8
 	app := kingpin.New("forms2xml", "Oracle Forms .fmb <-> .xml with optional conversion")
 	app.Flag("jdapi", "Form JDAPI helper HTTP listener URL").Default(jdapiURL).StringVar(&jdapiURL)
 
@@ -54,6 +55,7 @@ func Main() error {
 	cmdWatch.Arg("dst", "destination path").ExistingDirVar(&watchDst)
 	cmdWatch.Flag("suffix", "suffix of converted files").Default(fileSuffix).StringVar(&fileSuffix)
 	watchNoTransform := cmdWatch.Flag("no-transform", "don't transform").Default("false").Bool()
+	cmdWatch.Flag("concurrency", "maximum number of conversions running in parallel").Default(strconv.Itoa(concurrency)).IntVar(&concurrency)
 
 	switch kingpin.MustParse(app.Parse(os.Args[1:])) {
 	case cmdXML.FullCommand():
@@ -66,12 +68,13 @@ func Main() error {
 		return convertFiles6to11(*upDst, *upSrc, !*upNoTransform, *upSuffix)
 
 	case cmdWatch.FullCommand():
-		return watchConvert(watchDst, watchSrc, !*watchNoTransform, fileSuffix)
+		return watchConvert(watchDst, watchSrc, !*watchNoTransform, fileSuffix, concurrency)
 	}
 	return nil
 }
 
-func watchConvert(dstDir, srcDir string, doTransform bool, suffix string) error {
+func watchConvert(dstDir, srcDir string, doTransform bool, suffix string, concurrency int) error {
+	tokens := make(chan struct{}, concurrency)
 	eventCh := make(chan notify.EventInfo, 16)
 	if err := notify.Watch(srcDir, eventCh, notify.InCloseWrite, notify.InMovedTo); err != nil {
 		return err
@@ -82,11 +85,15 @@ func watchConvert(dstDir, srcDir string, doTransform bool, suffix string) error 
 		if !strings.HasSuffix(bn, ".fmb") {
 			continue
 		}
-		if err := convertFiles6to11(
-			filepath.Join(dstDir, bn), fn, doTransform, suffix,
-		); err != nil {
-			log.Println(err)
-		}
+		go func() {
+			tokens <- struct{}{}
+			defer func() { <-tokens }()
+			if err := convertFiles6to11(
+				filepath.Join(dstDir, bn), fn, doTransform, suffix,
+			); err != nil {
+				log.Println(err)
+			}
+		}()
 	}
 	return nil
 }
