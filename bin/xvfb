@@ -1,0 +1,30 @@
+#!/bin/bash
+# chkconfig: 345 95 50
+# description: Starts xvfb on display 11
+# why 11? dunno I just work here. :( -FB
+# 9/30/13 r1 - initial addition -FB
+ 
+if [ -z "$1" ]; then
+echo "`basename $0` {start|stop}"
+    exit
+fi
+
+N=11
+ 
+case "$1" in
+start)
+    if ! [ -e /etc/X"$N".hosts ]; then
+        echo 'local:' >/etc/X"$N".hosts
+    fi
+    /usr/bin/Xvfb :"$N" &
+;;
+ 
+stop)
+    killall Xvfb
+;;
+
+restart)
+    "$0" stop
+    "$0" start
+;;
+esac

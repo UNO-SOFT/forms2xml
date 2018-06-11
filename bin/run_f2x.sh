@@ -1,6 +1,6 @@
 #!/bin/sh
 set -e
-cd "$(cd "$(dirname "$0")"; pwd)"
+cd "$(cd "$(dirname "$0")"; pwd)/.."
 export ORACLE_BASE=/oracle/mw11gR1
 export ORACLE_HOME=$ORACLE_BASE/fr11gR2
 # /oracle/mw11gR1/fr11gR2/lib/libfrmjapi.so.0
