@@ -40,15 +40,11 @@ public class Serve {
         this.addr = addr;
         this.server = HttpServer.create(addr, 10);
 
-        String formsPath = System.getenv().get("BRUNO_HOME");
-        if (formsPath.isEmpty()) {
-            formsPath = System.getenv().get("ABLAK_HOME");
-            Jdapi.connectToDatabase(System.getenv().get("ABLAK_ID"));
-        } else {
-            Jdapi.connectToDatabase(System.getenv().get("BRUNO_ID"));
-        }
-        formsPath += "/../lib";
-        System.out.println("formsPath=" + formsPath);
+        String formsPath = System.getProperty("forms.lib.path");
+        System.out.println("forms.lib.path=" + formsPath);
+		String conn = System.getProperty("forms.db.conn");
+        System.out.println("forms.db.conn=" + conn);
+		Jdapi.connectToDatabase(conn);
 
         server.createContext("/", new ConvertHandler(formsPath));
         server.setExecutor(null); // creates a default executor
@@ -103,14 +99,14 @@ public class Serve {
 
 		public ConvertHandler(String formsPath ) {
 			this.formsPath = formsPath;
-			System.out.println("initialize");
+			System.out.println("Initialize with empty.fmb ...");
 			try {
 				new Forms2XML(new File("empty.fmb"));
 				new XML2Forms(null);
 			} catch(Exception e) {
 				System.out.println(e.toString());
 			}
-			System.out.println("initialized");
+			System.out.println("Initialized successfully.");
 		}
 
         @Override
