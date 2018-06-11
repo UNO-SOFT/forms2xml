@@ -4,7 +4,7 @@ set ORACLE_HOME=%ORACLE_BASE%\fr11gR2
 set PATH=%ORACLE_HOME%\BIN;%ORACLE_HOME%\lib;%PATH%
 set JAVA_HOME=%ORACLE_BASE%\jdk
 set CLASSPATH=classes;%ORACLE_HOME%\jlib\frmjdapi.jar;%ORACLE_HOME%\jlib\frmxmltools.jar;%ORACLE_HOME%\lib\xmlparserv2.jar
-mkdir -p classes
+mkdir classes
 
 @echo on
 %JAVA_HOME%\bin\javac -cp %CLASSPATH% -d classes src/unosoft/forms/Serve.java

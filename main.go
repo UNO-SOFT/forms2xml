@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/pkg/errors"
@@ -95,6 +96,7 @@ func watchConvert(dstDir, srcDir string, doTransform bool, suffix string, concur
 		return err
 	}
 	for evt := range eventCh {
+		notsure := evt.Event() == notify.Create
 		fn := evt.Path()
 		bn := filepath.Base(fn)
 		if !strings.HasSuffix(bn, ".fmb") {
@@ -103,10 +105,17 @@ func watchConvert(dstDir, srcDir string, doTransform bool, suffix string, concur
 		go func() {
 			tokens <- struct{}{}
 			defer func() { <-tokens }()
-			if err := convertFiles6to11(
-				filepath.Join(dstDir, bn), fn, doTransform, suffix,
-			); err != nil {
-				log.Println(err)
+			for i := 0; i < 10; i++ {
+				err := convertFiles6to11(
+					filepath.Join(dstDir, bn), fn, doTransform, suffix,
+				)
+				if err != nil {
+					log.Println(err)
+				}
+				if err == nil || !notsure {
+					break
+				}
+				time.Sleep(time.Duration(i) * time.Second)
 			}
 		}()
 	}
@@ -146,6 +155,7 @@ func convertFiles6to11(dst, src string, doTransform bool, suffix string) error {
 	if dst == src {
 		return errors.Wrap(errors.New("overwrite source file"), src)
 	}
+	log.Printf("Convert %q to %q.", src, dst)
 	inp, err := os.Open(src)
 	if err != nil {
 		return err

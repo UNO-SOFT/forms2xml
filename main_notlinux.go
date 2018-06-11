@@ -19,4 +19,4 @@ package main
 
 import "github.com/rjeczalik/notify"
 
-var eventsToWatch = []notify.Event{notify.Create}
+var eventsToWatch = []notify.Event{notify.Write}
