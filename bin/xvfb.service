@@ -1,0 +1,11 @@
+[Unit]
+Description=X Virtual Frame Buffer Service
+After=network.target
+
+[Service]
+Environment=N=11
+ExecStartPre=-/bin/bash -c "if ! [ -e /etc/X${N}.hosts ]; then echo local: >/etc/X${N}.hosts; fi"
+ExecStart=/usr/bin/Xvfb :${N}
+
+[Install]
+WantedBy=multi-user.target
