@@ -3,6 +3,7 @@ set -e
 cd "$(cd "$(dirname "$0")"; pwd)"
 export ORACLE_BASE=/oracle/mw11gR1
 export ORACLE_HOME=$ORACLE_BASE/fr11gR2
+# /oracle/mw11gR1/fr11gR2/lib/libfrmjapi.so.0
 export LD_LIBRARY_PATH=$ORACLE_HOME/bin:$ORACLE_HOME/lib:$LD_LIBRARY_PATH
 export DISPLAY=${DISPLAY:-"localhost:10.0"}
 export TERM=xterm
@@ -13,10 +14,9 @@ if ! [ "${NOCOMPILE:-0}" -eq 1 ]; then
 	mkdir -p classes
 	javac -cp $CLASSPATH -d classes src/unosoft/forms/Serve.java
 fi
-export LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH
 export -p
 set -x
-exec java -cp "$CLASSPATH" -Djava.library.path=$ORACLE_HOME/bin unosoft.forms.Serve \
+exec java -cp "$CLASSPATH" -Djava.library.path=$ORACLE_HOME/lib \
 	"-Dforms.lib.path=$FORMS_LIB" \
 	"-Dforms.db.conn=$DB_CONN" \
-	"$@"
+	unosoft.forms.Serve "$@"
