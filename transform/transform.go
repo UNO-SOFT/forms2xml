@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"io"
+	//"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -144,7 +145,6 @@ Loop:
 var errSkipElement = errors.New("skip element")
 
 func (P *FormsXMLProcessor) processStartElement(enc *xml.Encoder, st *xml.StartElement) error {
-	return nil
 	if len(P.seen) != 0 && strings.HasSuffix(P.seen[len(P.seen)-1], "/FormModule") {
 		P.attachLibs(enc)
 	}
@@ -380,13 +380,18 @@ func (P *FormsXMLProcessor) attachLibs(enc *xml.Encoder) error {
 	return nil
 }
 
-var BadItemType = map[string]string{"Check Box": "Display Item", "User Area": "Text Item"}
+var BadItemType = map[string]string{
+	"Check Box":                  "Display Item",
+	"User Area":                  "Text Item",
+	"ActiveX Control (Obsolete)": "Text Item",
+}
 
 func (P *FormsXMLProcessor) fixBadItemType(st *xml.StartElement) {
 	if st.Name.Local != "Item" {
 		return
 	}
 	if i := findAttr(st.Attr, "ItemType"); i >= 0 {
+		//log.Printf("ItemType[%d]=%q => %q", i, st.Attr[i].Value, BadItemType[st.Attr[i].Value])
 		if v := BadItemType[st.Attr[i].Value]; v != "" {
 			st.Attr[i].Value = v
 		}

@@ -96,25 +96,23 @@ func watchConvert(dstDir, srcDir string, doTransform bool, suffix string, concur
 		return err
 	}
 	for evt := range eventCh {
-		notsure := evt.Event() == notify.Create
 		fn := evt.Path()
 		bn := filepath.Base(fn)
 		if !strings.HasSuffix(bn, ".fmb") {
 			continue
 		}
 		go func() {
+			time.Sleep(time.Second)
 			tokens <- struct{}{}
 			defer func() { <-tokens }()
 			for i := 0; i < 10; i++ {
 				err := convertFiles6to11(
 					filepath.Join(dstDir, bn), fn, doTransform, suffix,
 				)
-				if err != nil {
-					log.Println(err)
-				}
-				if err == nil || !notsure {
+				if err == nil {
 					break
 				}
+				log.Println(err)
 				time.Sleep(time.Duration(i) * time.Second)
 			}
 		}()
@@ -183,10 +181,21 @@ func convertFiles6to11(dst, src string, doTransform bool, suffix string) error {
 		xmlSource := xr
 		if doTransform {
 			tr, tw := io.Pipe()
+			xmlW := io.WriteCloser(tw)
+			xmlFn := strings.TrimSuffix(dst, ".fmb") + ".xml"
+			if xmlFh, err := os.Create(xmlFn); err != nil {
+				log.Println(err)
+			} else {
+				defer xmlFh.Close()
+				xmlW = struct {
+					io.Writer
+					io.Closer
+				}{io.MultiWriter(tw, xmlFh), tw}
+			}
 			xmlSource = tr
 			grp.Go(func() error {
 				log.Println("start transform")
-				err := P.ProcessStream(tw, xr)
+				err := P.ProcessStream(xmlW, xr)
 				log.Printf("xml->xml: %+v", err)
 				tw.CloseWithError(err)
 				return err
