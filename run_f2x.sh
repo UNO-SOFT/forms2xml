@@ -16,4 +16,7 @@ fi
 export LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH
 export -p
 set -x
-exec java -cp "$CLASSPATH" -djava.library.path=$ORACLE_HOME/bin unosoft.forms.Serve "$@"
+exec java -cp "$CLASSPATH" -Djava.library.path=$ORACLE_HOME/bin unosoft.forms.Serve \
+	"-Dforms.lib.path=$FORMS_LIB" \
+	"-Dforms.db.conn=$DB_CONN" \
+	"$@"
