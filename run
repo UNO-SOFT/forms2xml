@@ -6,18 +6,6 @@ export ORACLE_HOME=$ORACLE_BASE/fr11gR2
 export LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH
 export DISPLAY=${DISPLAY:-"localhost:10.0"}
 export TERM=xterm
-export QTLIB=/usr/lib64/qt-3.3/lib
-export QTINC=/usr/lib64/qt-3.3/include
-export SHLVL=3
-export PATH="/home/kobe/dev/bruno/bin:/home/kobe/dev/go/bin:/usr/local/go/bin:/home/kobe/dev/bin:/home/kobe/bin:/home/bin:/oracle/db11gR2/product/bin:/home/kobe/dev/bruno/bin:/home/kobe/dev/go/bin:/usr/local/go/bin:/home/kobe/dev/bin:/home/kobe/bin:/home/bin:/oracle/db11gR2/product/bin:/usr/lib64/qt-3.3/bin:/usr/local/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/sbin:/home/tgulacsi/bin:/home/tgulacsi/bin:/sbin:/home/tgulacsi/bin:/sbin"
-
-export SSH_AUTH_SOCK="/tmp/ssh-QONkD22323/agent.22323"
-export SSH_CLIENT="192.168.17.6 58730 22"
-export SSH_CONNECTION="192.168.17.6 58730 10.65.25.21 22"
-export SSH_TTY=""
-export SVDIR="/home/kobe/dev/admin/services"
-export TMUX_PANE="%1"
-export TMUX="/tmp/tmux-1005/default,22421,0"
 
 CLASSPATH=$CLASSPATH:classes:$ORACLE_HOME/jlib/frmjdapi.jar:$ORACLE_HOME/jlib/frmxmltools.jar:$ORACLE_HOME/lib/xmlparserv2.jar
 set -x
