@@ -42,13 +42,19 @@ func main() {
 	}
 }
 
-var jdapiURL = "http://localhost:8008"
+var jdapiURLs = []string{"http://localhost:8008"}
 
 func Main() error {
+	if len(jdapiURLs) == 1 {
+		jdapiURLs = append(jdapiURLs, jdapiURLs[0])
+	}
 
 	var concurrency = 8
 	app := kingpin.New("forms2xml", "Oracle Forms .fmb <-> .xml with optional conversion")
-	app.Flag("jdapi", "Form JDAPI helper HTTP listener URL").Default(jdapiURL).StringVar(&jdapiURL)
+	app.Flag("jdapi-src", "SRC Form JDAPI helper HTTP listener URL").
+		Default(jdapiURLs[0]).StringVar(&jdapiURLs[0])
+	app.Flag("jdapi-dst", "DEST Form JDAPI helper HTTP listener URL").
+		Default(jdapiURLs[1]).StringVar(&jdapiURLs[1])
 
 	cmdXML := app.Command("xml", "convert to-from XML").Default()
 	xmlSrc := cmdXML.Arg("src", "source file").ExistingFile()
@@ -73,7 +79,8 @@ func Main() error {
 	watchNoTransform := cmdWatch.Flag("no-transform", "don't transform").Default("false").Bool()
 	cmdWatch.Flag("concurrency", "maximum number of conversions running in parallel").Default(strconv.Itoa(concurrency)).IntVar(&concurrency)
 
-	switch kingpin.MustParse(app.Parse(os.Args[1:])) {
+	cmd := kingpin.MustParse(app.Parse(os.Args[1:]))
+	switch cmd {
 	case cmdXML.FullCommand():
 		return convertFiles(*xmlDst, *xmlSrc)
 
@@ -285,7 +292,11 @@ func convert(w io.Writer, r io.Reader, mimeType string) error {
 			logger.Printf("REQUEST[%d] to %q with %q", nth, req.URL, req.Header)
 		}
 	}
-	req, err := retryablehttp.NewRequest("POST", jdapiURL, bytes.NewReader(b))
+	URL := jdapiURLs[0]
+	if len(jdapiURLs) > 1 && mimeType == "application/xml" {
+		URL = jdapiURLs[1]
+	}
+	req, err := retryablehttp.NewRequest("POST", URL, bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
@@ -294,7 +305,7 @@ func convert(w io.Writer, r io.Reader, mimeType string) error {
 	req.Header.Set("Accept", "*/*")
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return errors.Wrapf(err, "POST to %q with %q", jdapiURL, mimeType)
+		return errors.Wrapf(err, "POST to %q with %q", URL, mimeType)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
