@@ -202,9 +202,12 @@ func (P *FormsXMLProcessor) removeExcessAlert(st *xml.StartElement) error {
 }
 
 var stackedCanvasAttrs = map[string]string{
-	"ParentType": "4", "ParentName": "C_STCK_CONTENT", "ParentModule": "BR_FLIB",
+	"ParentType":          "4",
+	"ParentName":          "C_CONTENT",
+	"ParentModule":        "BR_FLIB",
 	"VisualAttributeName": "NORMAL",
-	"ParentFilename":      "BR_FLIB.fmb", "ParentModuleType": "12",
+	"ParentFilename":      "BR_FLIB.fmb",
+	"ParentModuleType":    "12",
 }
 
 // stacked canvas -> C_CONTENT

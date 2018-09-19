@@ -180,8 +180,19 @@ func convertFiles6to11(dst, src string, doTransform bool, suffix string) error {
 	grp.Go(func() error {
 		xmlSource := xr
 		if doTransform {
+			xmlR := io.ReadCloser(xr)
 			tr, tw := io.Pipe()
 			xmlW := io.WriteCloser(tw)
+			xmlSrcFn := strings.TrimSuffix(src, ".fmb") + ".xml"
+			if xmlSrcFh, err := os.Create(xmlSrcFn); err != nil {
+				log.Println(err)
+			} else {
+				defer xmlSrcFh.Close()
+				xmlR = struct {
+					io.Reader
+					io.Closer
+				}{io.TeeReader(xr, xmlSrcFh), xr}
+			}
 			xmlFn := strings.TrimSuffix(dst, ".fmb") + ".xml"
 			if xmlFh, err := os.Create(xmlFn); err != nil {
 				log.Println(err)
@@ -195,7 +206,7 @@ func convertFiles6to11(dst, src string, doTransform bool, suffix string) error {
 			xmlSource = tr
 			grp.Go(func() error {
 				log.Println("start transform")
-				err := P.ProcessStream(xmlW, xr)
+				err := P.ProcessStream(xmlW, xmlR)
 				log.Printf("xml->xml: %+v", err)
 				tw.CloseWithError(err)
 				return err
