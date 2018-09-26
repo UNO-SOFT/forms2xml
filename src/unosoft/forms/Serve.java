@@ -44,8 +44,9 @@ public class Serve {
         System.out.println("forms.lib.path=" + formsPath);
 		String conn = System.getProperty("forms.db.conn");
         System.out.println("forms.db.conn=" + conn);
+		Jdapi.connectToDatabase(conn);
 
-        server.createContext("/", new ConvertHandler(conn, formsPath));
+        server.createContext("/", new ConvertHandler(formsPath));
         server.setExecutor(null); // creates a default executor
     }
 
@@ -87,28 +88,20 @@ public class Serve {
 
     public void Start() {
         System.out.println("Start listening on " + this.addr);
-
+        // http://www.dbadvice.be/oracle-forms-java-api-jdapi/
+        Jdapi.setFailLibraryLoad(false);
+        Jdapi.setFailSubclassLoad(false);
         this.server.start();
     }
 
     class ConvertHandler implements HttpHandler {
         String formsPath = null;
-		String conn = null;
 
-		public ConvertHandler(String conn, String formsPath ) {
-			this.conn = conn;
+		public ConvertHandler(String formsPath ) {
 			this.formsPath = formsPath;
-
-			// http://www.dbadvice.be/oracle-forms-java-api-jdapi/
-			System.out.println("Connecting to "+this.conn+" ...");
-			Jdapi.connectToDatabase(this.conn);
-			System.out.println("setFailLibraryLoad");
-			Jdapi.setFailLibraryLoad(false);
-			Jdapi.setFailSubclassLoad(false);
 			System.out.println("Initialize with empty.fmb ...");
 			try {
 				new Forms2XML(new File("empty.fmb"));
-				System.out.println("Loaded empty.fmb.");
 				new XML2Forms(null);
 			} catch(Exception e) {
 				System.out.println(e.toString());

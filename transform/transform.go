@@ -29,7 +29,10 @@ import (
 
 const DefaultCellWidth, DefaultCellHeight = 12, 24
 
-var DefaultUsedVisualAttributes = []string{"NORMAL_ITEM", "SELECT", "NORMAL_PROMPT", "NORMAL"}
+var DefaultUsedVisualAttributes = []string{
+	"NORMAL_ITEM", "SELECT", "NORMAL_PROMPT", "NORMAL",
+	"NORMAL_CANVAS",
+}
 
 type FormsXMLProcessor struct {
 	CellWidth, CellHeight uint8
@@ -76,6 +79,10 @@ func (P *FormsXMLProcessor) Process(enc *xml.Encoder, dec *xml.Decoder) error {
 			P.missingParams[p] = struct{}{}
 		}
 	}
+	/* # TODO:
+	Menu Module M_MENU
+
+	*/
 
 	/*
 	   	# TODO: !
@@ -153,11 +160,19 @@ func (P *FormsXMLProcessor) processStartElement(enc *xml.Encoder, st *xml.StartE
 	}
 	switch st.Name.Local {
 	case "VisualAttribute":
+		P.addTriggers(enc)
 		delete(P.missingVAs, getAttr(st.Attr, "Name"))
 	case "ModuleParameter":
 		delete(P.missingParams, getAttr(st.Attr, "Name"))
 	case "Window":
-		if err := P.addMissingVAs(enc, P.missingVAs); err != nil {
+		vas := make(map[string]struct{}, len(P.UsedVisualAttributes)+len(P.missingVAs))
+		for s := range P.UsedVisualAttributes {
+			vas[s] = struct{}{}
+		}
+		for s := range P.missingVAs {
+			vas[s] = struct{}{}
+		}
+		if err := P.addMissingVAs(enc, vas); err != nil {
 			return err
 		}
 	}
@@ -182,11 +197,32 @@ func (P *FormsXMLProcessor) processStartElement(enc *xml.Encoder, st *xml.StartE
 	P.scaleElt(st)
 	P.fixParentModule(st)
 	P.subclassRootwindow(st)
+	//P.fixContentCanvas(st)
 	P.fixBadItemType(st)
 	P.trimSpaces(st)
 	P.fixVAs(st)
 	P.fixPromptVAs(st)
 
+	return nil
+}
+
+func (P *FormsXMLProcessor) addTriggers(enc *xml.Encoder) error {
+	type Trigger struct {
+		Name, ParentModule, ParentModuleType, ParentName, ParentFilename, ParentType string
+	}
+	for _, nm := range []string{
+		"ON-MESSAGE", "ON-ERROR",
+		"KEY-SCRUP", "KEY-SCRDOWN", "KEY-PREV-ITEM", "KEY-NEXT-ITEM",
+		"KEY-UP", "KEY-DOWN", "KEY-OTHERS",
+		"PRE-FORM",
+	} {
+		if err := enc.Encode(Trigger{Name: nm,
+			ParentModule: "BR_FLIB", ParentModuleType: "12",
+			ParentName: nm, ParentFilename: "BR_FLIB.fmb", ParentType: "37",
+		}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -232,6 +268,16 @@ func (P *FormsXMLProcessor) fixStackedCanvas(st *xml.StartElement) {
 			st.Attr = append(st.Attr[:i], st.Attr[i+1:]...)
 		}
 	}
+
+	if getAttr(st.Attr, "Name") == "C_CONTENT" {
+		st.Attr = setAttrs(st.Attr, DefaultContentCanvasAttrs)
+	}
+}
+
+var DefaultContentCanvasAttrs = map[string]string{
+	"VisualAttributeName": "NORMAL_CANVAS",
+	"Width":               "1010", "Height": "621",
+	"ViewportWidth": "720", "ViewportHeight": "432",
 }
 
 var coordinate = map[string]string{
@@ -243,13 +289,15 @@ var coordinate = map[string]string{
 }
 
 var DefaultVA = VisualAttribute{
-	ParentModule: "BR_FLIB", ParentModuleType: "12", ParentFilename: "BR_FLIB.fmb",
+	ParentModule: "BR_FLIB", ParentModuleType: "12",
+	ParentFilename: "BR_FLIB.fmb", ParentType: "39",
 	Attributes: []xml.Attr{{Name: xml.Name{Local: "DirtyInfo"}, Value: "true"}},
 }
 
 func (P *FormsXMLProcessor) fixCoordinate(st *xml.StartElement) {
 	if st.Name.Local == "FormModule" {
-		setAttr(st.Attr, "ConsoleWindow", "W_MAIN")
+		st.Attr = setAttr(st.Attr, "ConsoleWindow", "W_MAIN")
+		st.Attr = setAttr(st.Attr, "MenuModule", "M_MENU")
 		return
 	}
 	if st.Name.Local != "Coordinate" {
@@ -323,8 +371,8 @@ var ParentModules = map[string]Subclass{
 func (P *FormsXMLProcessor) fixParentModule(st *xml.StartElement) {
 	module := getAttr(st.Attr, "ParentModule")
 	if pm, ok := ParentModules[module]; ok {
-		setAttr(st.Attr, "ParentModule", pm.ParentModule)
-		setAttr(st.Attr, "ParentFilename", pm.ParentFilename)
+		st.Attr = setAttr(st.Attr, "ParentModule", pm.ParentModule)
+		st.Attr = setAttr(st.Attr, "ParentFilename", pm.ParentFilename)
 	}
 }
 
@@ -335,13 +383,29 @@ var RootwindowSet = map[string]string{
 	"ParentModuleType":    "12",
 	"VisualAttributeName": "NORMAL",
 	"Name":                "W_MAIN",
+	//<Window Name="W_MAIN" ShowHorizontalScrollbar="false" MinimizeAllowed="false" Width="1010" ResizeAllowed="false" PrimaryCanvas="C_CONTENT" XPosition="0" YPosition="20" MaximizeAllowed="false" DirtyInfo="true" VisualAttributeName="NORMAL" Modal="true" MoveAllowed="false" ShowVerticalScrollbar="false" Height="601"/>
+	"ShowHorizontalScrollbar": "false", "ShowVerticalScrollbar": "false",
+	"MinimizeAllowed": "false", "MoveAllowed": "false", "ResizeAllowed": "false",
+	"PrimaryCanvas": "C_CONTENT",
+	"Width":         "1010", "Height": "601",
+	"XPosition": "0", "YPosition": "0",
 }
 var RootwindowDel = []string{
-	"Height", "Width", "WindowStyle", "CloseAllowed",
-	"MoveAllowed", "ResizeAllowed", "MinimizeAllowed",
+	//"Height", "Width",
+	"WindowStyle", "CloseAllowed",
+	//"MoveAllowed", "ResizeAllowed", "MinimizeAllowed",
 	"InheritMenu", "Bevel", "FontName", "FontSize",
 	"FontWeight", "FontStyle", "FontSpacing",
 }
+
+/*
+var ContentCanvasSet = map[string]string{
+	//<Canvas Name="C_CONTENT" DirtyInfo="true" VisualAttributeName="NORMAL_CANVAS" Width="1010" WindowName="W_MAIN" Height="621" ViewportHeight="432" ViewportWidth="720"/>
+	"VisualAttributeName": "NORMAL_CANVAS",
+	"Width":               "1010", "Height": "610",
+	"ViewportHeight": "432", "ViewportWidth": "720",
+}
+*/
 
 func (P *FormsXMLProcessor) subclassRootwindow(st *xml.StartElement) {
 	if i := findAttr(st.Attr, "WindowName"); i >= 0 && st.Attr[i].Value == "ROOT_WINDOW" {
@@ -361,8 +425,10 @@ func (P *FormsXMLProcessor) subclassRootwindow(st *xml.StartElement) {
 			st.Attr = append(st.Attr[:i], st.Attr[i+1:]...)
 		}
 	}
-	setAttrs(st.Attr, RootwindowSet)
+	st.Attr = setAttrs(st.Attr, RootwindowSet)
 }
+
+//func (P *FormsXMLProcessor) fixContentCanvas(st *xml.StartElement) {
 
 var RequiredLibs = []string{"BR_PROCEDURE_LIB"}
 
@@ -449,18 +515,18 @@ func (P *FormsXMLProcessor) fixVAs(st *xml.StartElement) {
 
 	switch st.Name.Local {
 	case "Block":
-		setAttr(st.Attr, "RecordVisualAttributeGroupName", "SELECT")
+		st.Attr = setAttr(st.Attr, "RecordVisualAttributeGroupName", "SELECT")
 
 	case "VisualAttribute":
 		i := findAttr(st.Attr, "Name")
 		rnev := st.Attr[i].Value
 		if R, ok := VAReplace[rnev]; ok {
 			st.Attr[i].Value = R.Replacement
-			setAttr(st.Attr, "ParentName", R.Replacement)
+			st.Attr = setAttr(st.Attr, "ParentName", R.Replacement)
 			P.missingVAs[R.Replacement] = struct{}{}
 		}
 		if i = findAttr(st.Attr, "ParentModule"); i >= 0 && st.Attr[i].Value == "G_LIB" {
-			setAttrs(st.Attr, VisualAttrs)
+			st.Attr = setAttrs(st.Attr, VisualAttrs)
 		}
 	}
 }
