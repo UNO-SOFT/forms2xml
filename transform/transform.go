@@ -206,10 +206,18 @@ func (P *FormsXMLProcessor) processStartElement(enc *xml.Encoder, st *xml.StartE
 	return nil
 }
 
+type Trigger struct {
+	Name             string     `xml:",attr,omitempty"`
+	ParentModule     string     `xml:",attr,omitempty"`
+	ParentModuleType string     `xml:",attr,omitempty"`
+	ParentName       string     `xml:",attr,omitempty"`
+	ParentFilename   string     `xml:",attr,omitempty"`
+	ParentType       string     `xml:",attr,omitempty"`
+	TriggerText      string     `xml:",attr,omitempty"`
+	Attributes       []xml.Attr `xml:",any,attr"`
+}
+
 func (P *FormsXMLProcessor) addTriggers(enc *xml.Encoder) error {
-	type Trigger struct {
-		Name, ParentModule, ParentModuleType, ParentName, ParentFilename, ParentType string
-	}
 	for _, nm := range []string{
 		"ON-MESSAGE", "ON-ERROR",
 		"KEY-SCRUP", "KEY-SCRDOWN", "KEY-PREV-ITEM", "KEY-NEXT-ITEM",
@@ -734,17 +742,6 @@ type RadioButton struct {
 	Height                    string     `xml:",attr,omitempty"`
 	Width                     string     `xml:",attr,omitempty"`
 	Attributes                []xml.Attr `xml:",any,attr"`
-}
-
-type Trigger struct {
-	Name             string     `xml:",attr,omitempty"`
-	ParentModule     string     `xml:",attr,omitempty"`
-	ParentModuleType string     `xml:",attr,omitempty"`
-	ParentName       string     `xml:",attr,omitempty"`
-	ParentFilename   string     `xml:",attr,omitempty"`
-	ParentType       string     `xml:",attr,omitempty"`
-	TriggerText      string     `xml:",attr,omitempty"`
-	Attributes       []xml.Attr `xml:",any,attr"`
 }
 
 type Canvas struct {
