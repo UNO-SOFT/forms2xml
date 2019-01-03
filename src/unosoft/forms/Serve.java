@@ -111,6 +111,7 @@ public class Serve {
 
         @Override
         public void handle(HttpExchange t) throws IOException {
+			System.out.println("Got "+t.getRequestMethod()+" with ct="+t.getRequestHeaders().getFirst("Content-Type"));
 			OutputStream os = t.getResponseBody();
 			if( !t.getRequestMethod().equals("POST") ) {
 				byte[] response = ("only POST is allowed! (got "+t.getRequestMethod()+")").getBytes();
@@ -126,6 +127,7 @@ public class Serve {
 				ext = ".fmb.xml";
 				fromXML = true;
 			}
+			System.out.println("ext="+ext+" fromXML="+String.valueOf(fromXML));
 
 			File src = File.createTempFile("forms2xml-", ext);
 			try {

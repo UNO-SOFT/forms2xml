@@ -13,6 +13,8 @@
 //    See the License for the specific language governing permissions and
 //    limitations under the License.
 
+//go:generate env OHOME=/oracle/mw11gR1/fr11gR2 sh -c "set -x; javac -cp classes:${DOLLAR}OHOME/jlib/frmjdapi.jar:${DOLLAR}OHOME/jlib/frmxmltools.jar:${DOLLAR}OHOME/lib/xmlparserv2.jar -d classes src/unosoft/forms/Serve.java"
+
 package main
 
 import (
