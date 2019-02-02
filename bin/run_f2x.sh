@@ -3,6 +3,7 @@ set -e
 cd "$(cd "$(dirname "$0")"; pwd)/.."
 export ORACLE_BASE=/oracle/mw11gR1
 export ORACLE_HOME="$ORACLE_BASE/fr11gR2"
+export PATH=$ORACLE_HOME/bin:/usr/lib64/qt-3.3/bin:/usr/local/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/sbin:/home/$(id -gn)/bin
 # /oracle/mw11gR1/fr11gR2/lib/libfrmjapi.so.0
 export LD_LIBRARY_PATH="$ORACLE_HOME/bin:$ORACLE_HOME/lib:$LD_LIBRARY_PATH"
 export TERM=xterm

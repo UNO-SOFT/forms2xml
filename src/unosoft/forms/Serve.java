@@ -15,13 +15,9 @@
 
 package unosoft.forms;
 
-import java.io.File;
-import java.io.InputStream;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.OutputStream;
-import java.io.IOException;
+import java.io.*;
 import java.net.InetSocketAddress;
+import java.util.Scanner;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -41,20 +37,119 @@ public class Serve {
         this.server = HttpServer.create(addr, 10);
 
         String formsPath = System.getProperty("forms.lib.path");
-        System.out.println("forms.lib.path=" + formsPath);
-		String conn = System.getProperty("forms.db.conn");
-        System.out.println("forms.db.conn=" + conn);
-		Jdapi.connectToDatabase(conn);
-
         server.createContext("/", new ConvertHandler(formsPath));
         server.setExecutor(null); // creates a default executor
     }
 
+	public static void Initialize(String conn) {
+        //String formsPath = System.getProperty("forms.lib.path");
+        //System.out.println("forms.lib.path=" + formsPath);
+        System.err.println("DBG connecting to" + conn);
+		Jdapi.connectToDatabase(conn);
+		System.err.println("DBG Initialize with empty.fmb ...");
+		try {
+			new Forms2XML(new File("empty.fmb"));
+			new XML2Forms(null);
+		} catch(Exception e) {
+			System.err.println("ERR "+e.toString());
+		}
+		System.err.println("DBG Initialized successfully.");
+	}
+
+	private static void swap() {
+		PrintStream ps = System.err;
+		System.setErr(System.out);
+		System.setOut( ps);
+	}
+
     public static void main(String[] args) throws Exception {
+		Initialize(System.getProperty("forms.db.conn"));
+
         String addrS = ":8000";
         if (args.length > 0) {
             addrS = args[0];
         }
+		if (addrS.equals("-")) {
+			PrintStream oriErr = System.err;
+			PrintStream oriOut = System.out;
+
+			String path = System.getProperty("user.dir");
+			System.err.println("Waiting [<src> <dst>] pairs on stdin...");
+			StreamTokenizer st = new StreamTokenizer(System.in);
+			st.eolIsSignificant(true);
+			String[] toks = new String[2];
+			int pos = 0;
+			while(true) {
+				int tt;
+				tt = st.nextToken();
+				System.err.println("TOK "+String.valueOf(tt) + " = "+st.sval);
+				if( tt == StreamTokenizer.TT_EOF) {
+					break;
+				}
+				if( tt != StreamTokenizer.TT_EOL ) {
+					toks[pos] = st.sval;
+					pos++;
+					continue;
+				} // EOL
+				System.err.println("DBG pos="+String.valueOf(pos));
+				int act = pos;
+				pos = 0;
+				if( act != 2 ) {
+					System.out.println("ERR need two args (got) "+String.valueOf(act));
+					continue;
+				}
+				File src = toks[0].startsWith("/") ? new File(toks[0]) : new File( path, toks[0]);
+				if( !src.exists() ) {
+					System.out.println("ERR file not exist: "+src.getName());
+					continue;
+				}
+				File dst = toks[1].startsWith("/") ? new File(toks[1]) : new File( path, toks[1]);
+				if( !dst.exists() ) {
+					System.out.println("ERR file not exist: "+dst.getName());
+					continue;
+				}
+
+				if( src.getName().endsWith(".fmb") ) {
+					// fmb -> XML
+					oracle.xml.parser.v2.XMLDocument xml = null;
+					System.err.println("DBG load "+src.getAbsolutePath());
+					try {
+						swap();
+						try {
+							xml = (new Forms2XML(src)).dumpModule();
+							xml.print(new FileOutputStream(dst));
+						} finally {
+							swap();
+						}
+					} catch(Exception e) {
+						swap();
+						System.out.println("ERR "+e.toString());
+						continue;
+					}
+					System.out.println("OK+ dumped "+src.getName()+" to "+dst);
+					continue;
+				}
+
+				// XML -> fmb
+				try {
+					swap();
+					try {
+						JdapiModule fmb = (new
+								XML2Forms(new java.net.URL("file://"+src))).createModule();
+							fmb.save(dst.getName());
+					} finally {
+						swap();
+					}
+				} catch( Exception e ) {
+					swap();
+					System.out.println("ERR "+e.toString());
+					continue;
+				}
+				System.out.println("OK+ written to "+dst);
+			}
+			return;
+		}
+
         String portS = addrS;
         int i = portS.lastIndexOf(':');
         if (i >= 0) {
@@ -99,14 +194,6 @@ public class Serve {
 
 		public ConvertHandler(String formsPath ) {
 			this.formsPath = formsPath;
-			System.out.println("Initialize with empty.fmb ...");
-			try {
-				new Forms2XML(new File("empty.fmb"));
-				new XML2Forms(null);
-			} catch(Exception e) {
-				System.out.println(e.toString());
-			}
-			System.out.println("Initialized successfully.");
 		}
 
         @Override
