@@ -122,7 +122,6 @@ public class Serve {
 							swap();
 						}
 					} catch(Exception e) {
-						swap();
 						System.out.println("ERR "+e.toString());
 						continue;
 					}
@@ -141,7 +140,6 @@ public class Serve {
 						swap();
 					}
 				} catch( Exception e ) {
-					swap();
 					System.out.println("ERR "+e.toString());
 					continue;
 				}
