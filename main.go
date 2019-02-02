@@ -1,4 +1,4 @@
-// Copyright 2018 Tamás Gulácsi
+// Copyright 2019 Tamás Gulácsi
 //
 //
 //    Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,36 +15,48 @@
 
 //go:generate env OHOME=/oracle/mw11gR1/fr11gR2 sh -c "set -x; javac -cp classes:${DOLLAR}OHOME/jlib/frmjdapi.jar:${DOLLAR}OHOME/jlib/frmxmltools.jar:${DOLLAR}OHOME/lib/xmlparserv2.jar -d classes src/unosoft/forms/Serve.java"
 
+//go:generate statik  -m -f -p statik -src classes
+
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"context"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/pkg/errors"
 	"github.com/rjeczalik/notify"
+	"github.com/tgulacsi/go/httpclient"
+	"github.com/tgulacsi/go/iohlp"
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/alecthomas/kingpin.v2"
 
 	"github.com/UNO-SOFT/forms2xml/transform"
+
+	_ "github.com/UNO-SOFT/forms2xml/statik"
+	"github.com/rakyll/statik/fs"
 )
 
 func main() {
 	if err := Main(); err != nil {
-		log.Fatal(err)
+		log.Fatalf("%+v", err)
 	}
 }
 
-var jdapiURLs = []string{"http://localhost:8008"}
+var jdapiURLs = []string{os.Getenv("BRUNO_ID")}
 
 func Main() error {
 	if len(jdapiURLs) == 1 {
@@ -52,11 +64,16 @@ func Main() error {
 	}
 
 	var concurrency = 8
+	formsLibPath := os.Getenv("FORMS_PATH")
+	if formsLibPath == "" {
+		formsLibPath = filepath.Join(filepath.Dir(os.Getenv("BRUNO_HOME")), "lib")
+	}
 	app := kingpin.New("forms2xml", "Oracle Forms .fmb <-> .xml with optional conversion")
 	app.Flag("jdapi-src", "SRC Form JDAPI helper HTTP listener URL").
 		Default(jdapiURLs[0]).StringVar(&jdapiURLs[0])
 	app.Flag("jdapi-dst", "DEST Form JDAPI helper HTTP listener URL").
 		Default(jdapiURLs[1]).StringVar(&jdapiURLs[1])
+	app.Flag("forms.lib.path", "FORMS_PATH").Default(formsLibPath).StringVar(&formsLibPath)
 
 	cmdXML := app.Command("xml", "convert to-from XML").Default()
 	xmlSrc := cmdXML.Arg("src", "source file").ExistingFile()
@@ -82,27 +99,39 @@ func Main() error {
 	cmdWatch.Flag("concurrency", "maximum number of conversions running in parallel").Default(strconv.Itoa(concurrency)).IntVar(&concurrency)
 
 	cmd := kingpin.MustParse(app.Parse(os.Args[1:]))
+
+	var converter Converter
+	if strings.Contains(jdapiURLs[0], "@") || strings.Contains(jdapiURLs[0], "/") && !strings.HasPrefix(jdapiURLs[0], "http") {
+		converter = newJavaRunner(jdapiURLs[0], formsLibPath)
+		defer (converter.(io.Closer)).Close()
+	} else {
+		converter = newHTTPClient(jdapiURLs)
+	}
+	log.Println("converter:", converter)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	switch cmd {
 	case cmdXML.FullCommand():
-		return convertFiles(*xmlDst, *xmlSrc)
+		return convertFiles(ctx, converter, *xmlDst, *xmlSrc)
 
 	case cmdTransform.FullCommand():
 		return transformFiles(*tranDst, *tranSrc)
 
 	case cmd6211.FullCommand():
-		return convertFiles6to11(*upDst, *upSrc, !*upNoTransform, *upSuffix)
+		return convertFiles6to11(ctx, converter, *upDst, *upSrc, !*upNoTransform, *upSuffix)
 
 	case cmdWatch.FullCommand():
-		return watchConvert(watchDst, watchSrc, !*watchNoTransform, fileSuffix, concurrency)
+		return watchConvert(ctx, converter, watchDst, watchSrc, !*watchNoTransform, fileSuffix, concurrency)
 	}
 	return nil
 }
 
-func watchConvert(dstDir, srcDir string, doTransform bool, suffix string, concurrency int) error {
+func watchConvert(ctx context.Context, converter Converter, dstDir, srcDir string, doTransform bool, suffix string, concurrency int) error {
 	tokens := make(chan struct{}, concurrency)
 	eventCh := make(chan notify.EventInfo, 16)
 	if err := notify.Watch(srcDir, eventCh, eventsToWatch...); err != nil {
-		return err
+		return errors.Wrap(err, "watch")
 	}
 	for evt := range eventCh {
 		fn := evt.Path()
@@ -116,6 +145,7 @@ func watchConvert(dstDir, srcDir string, doTransform bool, suffix string, concur
 			defer func() { <-tokens }()
 			for i := 0; i < 10; i++ {
 				err := convertFiles6to11(
+					ctx, converter,
 					filepath.Join(dstDir, bn), fn, doTransform, suffix,
 				)
 				if err == nil {
@@ -134,7 +164,7 @@ func transformFiles(dst, src string) error {
 	if !(src == "" || src == "-") {
 		var err error
 		if inp, err = os.Open(src); err != nil {
-			return err
+			return errors.Wrap(err, "open "+src)
 		}
 	}
 	defer inp.Close()
@@ -143,19 +173,19 @@ func transformFiles(dst, src string) error {
 	if !(dst == "" || dst == "-") {
 		var err error
 		if out, err = os.Create(dst); err != nil {
-			return err
+			return errors.Wrap(err, "create "+dst)
 		}
 	}
 	defer out.Close()
 
 	var P transform.FormsXMLProcessor
 	if err := P.ProcessStream(out, inp); err != nil {
-		return err
+		return errors.WithMessage(err, "processStream")
 	}
 	return out.Close()
 }
 
-func convertFiles6to11(dst, src string, doTransform bool, suffix string) error {
+func convertFiles6to11(ctx context.Context, converter Converter, dst, src string, doTransform bool, suffix string) error {
 	if dst == "" {
 		dst = strings.TrimSuffix(src, ".fmb") + suffix + ".fmb"
 	}
@@ -165,13 +195,13 @@ func convertFiles6to11(dst, src string, doTransform bool, suffix string) error {
 	log.Printf("Convert %q to %q.", src, dst)
 	inp, err := os.Open(src)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "open "+src)
 	}
 	defer inp.Close()
 	if dfi, err := os.Stat(dst); err == nil {
 		sfi, err := inp.Stat()
 		if err != nil {
-			return err
+			return errors.Wrap(err, "stat "+dst)
 		}
 		if os.SameFile(sfi, dfi) {
 			return errors.Wrap(errors.New("overwrite source file"), sfi.Name())
@@ -180,7 +210,7 @@ func convertFiles6to11(dst, src string, doTransform bool, suffix string) error {
 
 	out, err := os.Create(dst)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "create "+dst)
 	}
 	defer out.Close()
 	xr, xw := io.Pipe()
@@ -218,43 +248,38 @@ func convertFiles6to11(dst, src string, doTransform bool, suffix string) error {
 				err := P.ProcessStream(xmlW, xmlR)
 				log.Printf("xml->xml: %+v", err)
 				tw.CloseWithError(err)
-				return err
+				return errors.WithMessage(err, "processStream")
 			})
 		}
 		log.Println("start convert")
-		err := convert(out, xmlSource, "application/xml")
+		err := converter.Convert(ctx, out, xmlSource, "application/xml")
 		log.Printf("xml->fmb: %+v", err)
 		xr.CloseWithError(err)
-		return err
+		return errors.WithMessage(err, "convert")
 	})
-	err = convert(xw, inp, "application/x-oracle-forms")
+	err = converter.Convert(ctx, xw, inp, "application/x-oracle-forms")
 	log.Printf("fmb->xml: %+v", err)
 	xw.CloseWithError(err)
 	if err != nil {
-		return err
+		return errors.WithMessage(err, "convert")
 	}
 	if err = grp.Wait(); err != nil {
-		return err
+		return errors.WithMessage(err, "convertFiles6to11")
 	}
 	return out.Close()
 }
 
-func convertFiles(dst, src string) error {
+func convertFiles(ctx context.Context, converter Converter, dst, src string) error {
 	mimeType := "application/x-oracle-forms"
 	inp := io.ReadCloser(os.Stdin)
 	var err error
 	if src != "" && src != "-" {
-		if inp, err = os.Open(src); err != nil {
-			return err
-		}
-		if strings.HasSuffix(src, ".xml") {
-			mimeType = "application/xml"
-		}
+		return converter.ConvertFiles(ctx, dst, src)
 	} else {
 		var a [1024]byte
 		n, err := io.ReadAtLeast(inp, a[:], 4)
 		if err != nil {
-			return err
+			return errors.Wrap(err, "readAtLeast stdin")
 		}
 		if bytes.HasPrefix(bytes.TrimSpace(a[:n]), []byte("<?xml")) {
 			mimeType = "application/xml"
@@ -271,51 +296,230 @@ func convertFiles(dst, src string) error {
 	out := os.Stdout
 	if dst != "" && dst != "-" {
 		if out, err = os.Create(dst); err != nil {
-			return err
+			return errors.Wrap(err, "create "+dst)
 		}
 		defer out.Close()
 	}
 
-	if err = convert(out, inp, mimeType); err != nil {
-		return err
+	if err = converter.Convert(ctx, out, inp, mimeType); err != nil {
+		return errors.WithMessage(err, "convertFiles")
 	}
 	return out.Close()
 }
 
-var httpClient = retryablehttp.NewClient()
+type javaRunner struct {
+	DbConn, FormsLibPath           string
+	mu                             sync.Mutex
+	classes, classpath, oracleHome string
 
-func convert(w io.Writer, r io.Reader, mimeType string) error {
-	b, err := ioutil.ReadAll(r)
-	if err != nil {
-		return err
+	cancel  context.CancelFunc
+	request io.Writer
+	answer  *bufio.Scanner
+}
+
+func newJavaRunner(conn, formsLibPath string) *javaRunner {
+	return &javaRunner{DbConn: conn}
+}
+
+func (jr *javaRunner) Close() error {
+	jr.mu.Lock()
+	err := jr.stop()
+	jr.mu.Unlock()
+	return errors.WithMessage(err, "Close")
+}
+
+func (jr *javaRunner) stop() error {
+	cancel, classes := jr.cancel, jr.classes
+	jr.classes, jr.classpath = "", ""
+	jr.cancel, jr.request, jr.answer = nil, nil, nil
+	if cancel != nil {
+		cancel()
 	}
-	httpClient.RequestLogHook = func(logger *log.Logger, req *http.Request, nth int) {
+	if classes != "" {
+		os.RemoveAll(classes)
+	}
+	return nil
+}
+
+func (jr *javaRunner) start() error {
+	if jr.classpath == "" {
+		statikFS, err := fs.New()
+		if err != nil {
+			return errors.Wrap(err, "open statik fs")
+		}
+		if jr.classes, err = ioutil.TempDir("", "forms2xml-classes-"); err != nil {
+			if err != nil {
+				return errors.Wrap(err, "create temp dir for classes")
+			}
+		}
+
+		for _, fn := range []string{"/unosoft/forms/Serve$ConvertHandler.class", "/unosoft/forms/Serve.class"} {
+			b, err := fs.ReadFile(statikFS, fn)
+			if err != nil {
+				return errors.Wrap(err, "read "+fn)
+			}
+			fn = filepath.Join(jr.classes, fn)
+			os.MkdirAll(filepath.Dir(fn), 0755)
+			if err = ioutil.WriteFile(fn, b, 0644); err != nil {
+				return errors.Wrap(err, "write "+fn)
+			}
+		}
+		if jr.oracleHome == "" {
+			cmd := exec.Command("find", "/oracle", "-type", "f", "-name", "frmjdapi.jar")
+			b, _ := cmd.Output()
+			if err != nil && len(b) == 0 {
+				return errors.Wrapf(err, "%v", cmd.Args)
+			}
+			jr.oracleHome = filepath.Dir(filepath.Dir(string(bytes.SplitN(b, []byte("\n"), 2)[0])))
+		}
+		jr.classpath = jr.classes + ":" +
+			filepath.Join(jr.oracleHome, "jlib", "frmjdapi.jar") + ":" +
+			filepath.Join(jr.oracleHome, "jlib", "frmxmltools.jar") + ":" +
+			filepath.Join(jr.oracleHome, "lib", "xmlparserv2.jar")
+	}
+	log.Println("classpath:", jr.classpath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, "java", "-cp", jr.classpath,
+		"-Djava.library.path="+filepath.Join(jr.oracleHome, "lib"),
+		"-Dforms.lib.path="+jr.FormsLibPath,
+		"-Dforms.db.conn="+jr.DbConn,
+		"unosoft.forms.Serve", "-")
+	cmd.Env = append(os.Environ(),
+		"TERM=xterm",
+		"PATH="+filepath.Join(jr.oracleHome, "bin")+":"+os.Getenv("PATH"),
+		"LD_LIBRARY_PATH="+filepath.Join(jr.oracleHome, "bin")+":"+filepath.Join(jr.oracleHome, "lib")+":"+os.Getenv("LD_LIBRARY_PATH"),
+	)
+	cmd.Stderr = os.Stderr
+	jr.cancel = cancel
+	cmd.Stdin, jr.request = io.Pipe()
+	{
+		pr, pw := io.Pipe()
+		jr.answer, cmd.Stdout = bufio.NewScanner(pr), pw
+	}
+	return cmd.Start()
+}
+
+func (jr *javaRunner) ConvertFiles(ctx context.Context, dst, src string) error {
+	jr.mu.Lock()
+	defer jr.mu.Unlock()
+	if jr.request == nil {
+		if err := jr.start(); err != nil {
+			return errors.WithMessage(err, "start")
+		}
+	}
+	if _, err := fmt.Fprintf(jr.request, "%s %s\n", src, dst); err != nil {
+		jr.stop()
+		return errors.Wrap(err, "write request")
+	}
+	for jr.answer.Scan() {
+		line := jr.answer.Bytes()
+		if bytes.HasPrefix(line, []byte("ERR ")) {
+			return errors.New(string(line[4:]))
+		}
+		if bytes.HasPrefix(line, []byte("OK+ ")) {
+			log.Println(string(line[4:]))
+			return nil
+		}
+	}
+	return errors.New("no answer")
+}
+func (jr *javaRunner) Convert(ctx context.Context, w io.Writer, r io.Reader, mimeType string) error {
+	ext, want := "fmb", "xml"
+	if mimeType == "application/xml" || mimeType == "text/xml" {
+		ext, want = want, ext
+	}
+	fh, err := ioutil.TempFile("", "forms2xml-*."+ext)
+	if err != nil {
+		return errors.Wrap(err, "create temp file")
+	}
+	defer os.Remove(fh.Name())
+	want = fh.Name() + "." + want
+	if _, err = io.Copy(fh, r); err != nil {
+		return errors.Wrap(err, "copy to "+fh.Name())
+	}
+	if err = fh.Close(); err != nil {
+		return errors.Wrap(err, "close "+fh.Name())
+	}
+	if err = jr.ConvertFiles(ctx, want, fh.Name()); err != nil {
+		return errors.WithMessage(err, "convertFiles")
+	}
+	if fh, err = os.Open(want); err != nil {
+		return errors.Wrap(err, "open "+want)
+	}
+	_, err = io.Copy(w, fh)
+	return errors.Wrap(err, "copy from "+fh.Name())
+}
+
+type httpClient struct {
+	Client *retryablehttp.Client
+	URLs   []string
+}
+
+func newHTTPClient(urls []string) httpClient {
+	cl := httpclient.New("jdapi")
+	cl.RequestLogHook = func(logger retryablehttp.Logger, req *http.Request, nth int) {
 		if nth > 0 {
 			logger.Printf("REQUEST[%d] to %q with %q", nth, req.URL, req.Header)
 		}
 	}
-	URL := jdapiURLs[0]
-	if len(jdapiURLs) > 1 && mimeType == "application/xml" {
-		URL = jdapiURLs[1]
+	return httpClient{Client: cl, URLs: urls}
+}
+
+func (cl httpClient) Convert(ctx context.Context, w io.Writer, r io.Reader, mimeType string) error {
+	URL := cl.URLs[0]
+	if len(cl.URLs) > 1 && mimeType == "application/xml" {
+		URL = cl.URLs[1]
+	}
+
+	b, err := ioutil.ReadAll(r)
+	if err != nil {
+		return errors.Wrap(err, "read all")
 	}
 	req, err := retryablehttp.NewRequest("POST", URL, bytes.NewReader(b))
 	if err != nil {
-		return err
+		return errors.Wrap(err, URL)
 	}
 	req.Header.Set("Content-Length", strconv.Itoa(len(b)))
 	req.Header.Set("Content-Type", mimeType)
 	req.Header.Set("Accept", "*/*")
-	resp, err := httpClient.Do(req)
+	resp, err := cl.Client.Do(req.WithContext(ctx))
 	if err != nil {
 		return errors.Wrapf(err, "POST to %q with %q", URL, mimeType)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		b, _ := ioutil.ReadAll(resp.Body)
+		b, _ := iohlp.ReadAll(resp.Body, 1<<20)
 		return errors.Wrap(errors.New(resp.Status), string(b))
 	}
 	if _, err = io.Copy(w, resp.Body); err != nil {
-		return err
+		return errors.Wrap(err, "copy response")
 	}
 	return nil
+}
+
+func (cl httpClient) ConvertFiles(ctx context.Context, dst, src string) error {
+	mimeType := "application/xml"
+	if strings.HasSuffix(src, ".fmb") {
+		mimeType = "application/x-oracle-forms"
+	}
+	inp, err := os.Open(src)
+	if err != nil {
+		return errors.Wrap(err, "open "+src)
+	}
+	defer inp.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return errors.Wrap(err, "create "+dst)
+	}
+	defer out.Close()
+	if err = cl.Convert(ctx, out, inp, mimeType); err != nil {
+		return errors.WithMessage(err, "convert")
+	}
+	return out.Close()
+}
+
+type Converter interface {
+	Convert(ctx context.Context, w io.Writer, r io.Reader, mimeType string) error
+	ConvertFiles(ctx context.Context, dst, src string) error
 }
