@@ -70,9 +70,6 @@ public class Serve {
             addrS = args[0];
         }
 		if (addrS.equals("-")) {
-			PrintStream oriErr = System.err;
-			PrintStream oriOut = System.out;
-
 			String path = System.getProperty("user.dir");
 			System.err.println("Waiting [<src> <dst>] pairs on stdin...");
 			StreamTokenizer st = new StreamTokenizer(System.in);
@@ -135,11 +132,11 @@ public class Serve {
 					try {
 						JdapiModule fmb = (new
 								XML2Forms(new java.net.URL("file://"+src))).createModule();
-							fmb.save(dst.getName());
+						fmb.save(dst.getName());
 					} finally {
 						swap();
 					}
-				} catch( Exception e ) {
+				} catch(Exception e) {
 					System.out.println("ERR "+e.toString());
 					continue;
 				}
