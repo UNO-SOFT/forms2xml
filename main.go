@@ -30,10 +30,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/hashicorp/go-retryablehttp"
@@ -64,7 +66,7 @@ func Main() error {
 	}
 
 	var concurrency = 8
-	formsLibPath := os.Getenv("FORMS_PATH")
+	formsLibPath, display := os.Getenv("FORMS_PATH"), os.Getenv("DISPLAY")
 	if formsLibPath == "" {
 		formsLibPath = filepath.Join(filepath.Dir(os.Getenv("BRUNO_HOME")), "lib")
 	}
@@ -74,6 +76,7 @@ func Main() error {
 	app.Flag("jdapi-dst", "DEST Form JDAPI helper HTTP listener URL").
 		Default(jdapiURLs[1]).StringVar(&jdapiURLs[1])
 	app.Flag("forms.lib.path", "FORMS_PATH").Default(formsLibPath).StringVar(&formsLibPath)
+	app.Flag("display", "DISPLAY").Default(display).StringVar(&display)
 
 	cmdXML := app.Command("xml", "convert to-from XML").Default()
 	xmlSrc := cmdXML.Arg("src", "source file").ExistingFile()
@@ -100,26 +103,42 @@ func Main() error {
 
 	cmd := kingpin.MustParse(app.Parse(os.Args[1:]))
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigCh := make(chan os.Signal, 1)
+	go func() {
+		<-sigCh
+		cancel()
+		time.Sleep(time.Second)
+		os.Exit(1)
+	}()
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+
 	var converter Converter
 	if strings.Contains(jdapiURLs[0], "@") || strings.Contains(jdapiURLs[0], "/") && !strings.HasPrefix(jdapiURLs[0], "http") {
-		converter = newJavaRunner(jdapiURLs[0], formsLibPath)
+		converter = &javaRunner{DbConn: jdapiURLs[0], FormsLibPath: formsLibPath, Display: display,
+			globalCtx: ctx}
 		defer (converter.(io.Closer)).Close()
 	} else {
 		converter = newHTTPClient(jdapiURLs)
 	}
 	log.Println("converter:", converter)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	switch cmd {
 	case cmdXML.FullCommand():
-		return convertFiles(ctx, converter, *xmlDst, *xmlSrc)
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err := convertFiles(ctx, converter, *xmlDst, *xmlSrc)
+		cancel()
+		return err
 
 	case cmdTransform.FullCommand():
 		return transformFiles(*tranDst, *tranSrc)
 
 	case cmd6211.FullCommand():
-		return convertFiles6to11(ctx, converter, *upDst, *upSrc, !*upNoTransform, *upSuffix)
+		ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		err := convertFiles6to11(ctx, converter, *upDst, *upSrc, !*upNoTransform, *upSuffix)
+		cancel()
+		return err
 
 	case cmdWatch.FullCommand():
 		return watchConvert(ctx, converter, watchDst, watchSrc, !*watchNoTransform, fileSuffix, concurrency)
@@ -308,17 +327,14 @@ func convertFiles(ctx context.Context, converter Converter, dst, src string) err
 }
 
 type javaRunner struct {
-	DbConn, FormsLibPath           string
+	DbConn, Display, FormsLibPath  string
 	mu                             sync.Mutex
 	classes, classpath, oracleHome string
 
-	cancel  context.CancelFunc
-	request io.Writer
-	answer  *bufio.Scanner
-}
-
-func newJavaRunner(conn, formsLibPath string) *javaRunner {
-	return &javaRunner{DbConn: conn}
+	globalCtx context.Context
+	cancel    context.CancelFunc
+	request   io.Writer
+	answer    *bufio.Scanner
 }
 
 func (jr *javaRunner) Close() error {
@@ -379,23 +395,54 @@ func (jr *javaRunner) start() error {
 	}
 	log.Println("classpath:", jr.classpath)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(jr.globalCtx)
 	cmd := exec.CommandContext(ctx, "java", "-cp", jr.classpath,
 		"-Djava.library.path="+filepath.Join(jr.oracleHome, "lib"),
 		"-Dforms.lib.path="+jr.FormsLibPath,
 		"-Dforms.db.conn="+jr.DbConn,
 		"unosoft.forms.Serve", "-")
+	env := os.Environ()
+	for i := 0; i < len(env); i++ {
+		e := env[i]
+		if i := strings.IndexByte(e, '='); i < 0 {
+			env[i] = env[0]
+			env = env[1:]
+			i--
+		} else {
+			switch e[:i] {
+			case "TERM", "DISPLAY", "PATH", "FORMS_PATH", "LD_LIBRARY_PATH":
+				env[i] = env[0]
+				env = env[1:]
+				i--
+			}
+		}
+	}
 	cmd.Env = append(os.Environ(),
+		"DISPLAY="+jr.Display,
 		"TERM=xterm",
+		"FORMS_PATH="+jr.FormsLibPath,
 		"PATH="+filepath.Join(jr.oracleHome, "bin")+":"+os.Getenv("PATH"),
 		"LD_LIBRARY_PATH="+filepath.Join(jr.oracleHome, "bin")+":"+filepath.Join(jr.oracleHome, "lib")+":"+os.Getenv("LD_LIBRARY_PATH"),
 	)
+	log.Println(cmd.Env[len(cmd.Env)-4:])
+	log.Println(cmd.Args)
 	cmd.Stderr = os.Stderr
 	jr.cancel = cancel
-	cmd.Stdin, jr.request = io.Pipe()
+	{
+		pr, pw := io.Pipe()
+		cmd.Stdin, jr.request = pr, pw
+		go func() {
+			<-ctx.Done()
+			pw.CloseWithError(ctx.Err())
+		}()
+	}
 	{
 		pr, pw := io.Pipe()
 		jr.answer, cmd.Stdout = bufio.NewScanner(pr), pw
+		go func() {
+			<-ctx.Done()
+			pw.CloseWithError(ctx.Err())
+		}()
 	}
 	return cmd.Start()
 }
@@ -412,17 +459,21 @@ func (jr *javaRunner) ConvertFiles(ctx context.Context, dst, src string) error {
 		jr.stop()
 		return errors.Wrap(err, "write request")
 	}
-	for jr.answer.Scan() {
-		line := jr.answer.Bytes()
-		if bytes.HasPrefix(line, []byte("ERR ")) {
-			return errors.New(string(line[4:]))
+	grp, ctx := errgroup.WithContext(ctx)
+	grp.Go(func() error {
+		for jr.answer.Scan() {
+			line := jr.answer.Bytes()
+			if bytes.HasPrefix(line, []byte("ERR ")) {
+				return errors.New(string(line[4:]))
+			}
+			if bytes.HasPrefix(line, []byte("OK+ ")) {
+				log.Println(string(line[4:]))
+				return nil
+			}
 		}
-		if bytes.HasPrefix(line, []byte("OK+ ")) {
-			log.Println(string(line[4:]))
-			return nil
-		}
-	}
-	return errors.New("no answer")
+		return errors.New("no answer")
+	})
+	return grp.Wait()
 }
 func (jr *javaRunner) Convert(ctx context.Context, w io.Writer, r io.Reader, mimeType string) error {
 	ext, want := "fmb", "xml"
