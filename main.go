@@ -129,6 +129,7 @@ func Main() error {
 
 	case cmdServe.FullCommand():
 		http.Handle("/", jr)
+		log.Println("Listening on " + *cmdServeAddress)
 		return http.ListenAndServe(*cmdServeAddress, nil)
 
 	case cmdTransform.FullCommand():
@@ -551,7 +552,7 @@ func (jr *javaRunner) do(ctx context.Context, makeRequest func(address string) (
 	var err error
 	var resp *http.Response
 	for i := 0; i < jr.MaxRetries; i++ {
-		cl := jr.NewClient(ctx)
+		cl := jr.NewClient(context.Background())
 		var req *retryablehttp.Request
 		if req, err = makeRequest(cl.URL); err != nil {
 			return nil, errors.WithMessage(err, cl.URL)

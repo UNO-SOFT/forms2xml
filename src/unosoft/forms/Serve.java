@@ -21,6 +21,11 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.OutputStream;
 import java.io.IOException;
+import java.util.Map;
+import java.util.List;
+import java.util.LinkedList;
+import java.util.LinkedHashMap;
+import java.net.URLDecoder;
 import java.net.InetSocketAddress;
 
 import com.sun.net.httpserver.HttpExchange;
@@ -99,8 +104,8 @@ public class Serve {
 
 		public ConvertHandler(String formsPath ) {
 			this.formsPath = formsPath;
-			System.err.println("Initialize with empty.fmb ...");
 			if( false ) {
+				System.err.println("Initialize with empty.fmb ...");
 				try {
 					new Forms2XML(new File("empty.fmb"));
 					new XML2Forms(null);
@@ -115,29 +120,46 @@ public class Serve {
         public void handle(HttpExchange t) throws IOException {
 			System.out.println("Got "+t.getRequestMethod()+" with ct="+t.getRequestHeaders().getFirst("Content-Type"));
 			OutputStream os = t.getResponseBody();
-			if( !t.getRequestMethod().equals("POST") ) {
-				byte[] response = ("only POST is allowed! (got "+t.getRequestMethod()+")").getBytes();
-				t.sendResponseHeaders(403, response.length);
-				os.write(response);
-				os.close();
-				return;
-			}
-			String ext = ".fmb";
-			boolean fromXML = false;
-			if( t.getRequestHeaders().getFirst("Content-Type").equals("application/xml") ||
-					t.getRequestHeaders().getFirst("Accept").equals("application/x-oracle-forms") ) {
-				ext = ".fmb.xml";
-				fromXML = true;
-			}
-			System.err.println("ext="+ext+" fromXML="+String.valueOf(fromXML));
-
-			File src = File.createTempFile("forms2xml-", ext);
+			File src = null;
 			File dst = null;
+			boolean deleteSrc = false;
+			boolean deleteDst = false;
 			try {
-				FileOutputStream fos = new FileOutputStream(src);
-				long n = Serve.Copy(fos, t.getRequestBody());
-				fos.close();
-				System.err.println("Read "+n+" bytes into "+src.getName()+".");
+				Map<String, List<String>> values = splitQuery(t.getRequestURI().getRawQuery());
+				List<String> emptyList = new LinkedList<String>();
+				emptyList.add("");
+				String srcName = values.getOrDefault("src", emptyList).get(0);
+				String dstName = values.getOrDefault("dst", emptyList).get(0);
+				src = srcName.isEmpty() ? null : new File(srcName);
+				dst = dstName.isEmpty() ? null : new File(dstName);
+				boolean fromXML = srcName.endsWith(".xml");
+
+				if( t.getRequestMethod().equals("GET") ) {
+					//
+				} else if( t.getRequestMethod().equals("POST") ) {
+					fromXML = false;
+					String ext = ".fmb";
+					if( t.getRequestHeaders() != null && t.getRequestHeaders().getFirst("Content-Type") != null &&
+						(t.getRequestHeaders().getFirst("Content-Type").equals("application/xml") ||
+							t.getRequestHeaders().getFirst("Accept").equals("application/x-oracle-forms")) ) {
+						ext = ".fmb.xml";
+						fromXML = true;
+					}
+					System.err.println("ext="+ext+" fromXML="+String.valueOf(fromXML));
+
+					src = File.createTempFile("forms2xml-", ext);
+					deleteSrc = true;
+					FileOutputStream fos = new FileOutputStream(src);
+					long n = Serve.Copy(fos, t.getRequestBody());
+					fos.close();
+					System.err.println("Read "+n+" bytes into "+src.getName()+".");
+				} else {
+					byte[] response = ("only POST is allowed! (got "+t.getRequestMethod()+")").getBytes();
+					t.sendResponseHeaders(403, response.length);
+					os.write(response);
+					os.close();
+					return;
+				}
 
 				if( !fromXML ) {
 					// fmb -> XML
@@ -161,20 +183,40 @@ public class Serve {
 				JdapiModule fmb = (new
 						XML2Forms(new java.net.URL("file://"+src.getAbsolutePath()))).createModule();
 				dst = File.createTempFile("fmb2xml-", ".fmb");
+				deleteDst = true;
 				fmb.save(dst.getAbsolutePath());
 				t.getResponseHeaders().set("Content-Type", "application/x-oracle-forms");
 				t.getResponseHeaders().set("Location", "file://"+dst.getAbsolutePath());
 				t.sendResponseHeaders(201, 0);
 			} catch(Exception e) {
+				System.err.println("EXC "+e.toString());
+				e.printStackTrace();
 				t.getResponseHeaders().set("Content-Type", "text/plain");
 				byte[] response = ("ERROR: "+e.toString()).getBytes();
 				t.sendResponseHeaders(500, response.length);
 				os.write(response);
 			} finally {
 				os.close();
-				src.delete();
+				if( deleteSrc && src != null ) { src.delete(); }
+				if( deleteDst && dst != null ) { dst.delete(); }
 			}
-        }
+		}
     }
+
+	public static Map<String, List<String>> splitQuery(String query) throws java.io.UnsupportedEncodingException {
+  final Map<String, List<String>> query_pairs = new LinkedHashMap<String, List<String>>();
+if( query == null || query.isEmpty() ) { return query_pairs; }
+  final String[] pairs = query.split("&");
+  for (String pair : pairs) {
+    final int idx = pair.indexOf("=");
+    final String key = idx > 0 ? URLDecoder.decode(pair.substring(0, idx), "UTF-8") : pair;
+    if (!query_pairs.containsKey(key)) {
+      query_pairs.put(key, new LinkedList<String>());
+    }
+    final String value = idx > 0 && pair.length() > idx + 1 ? URLDecoder.decode(pair.substring(idx + 1), "UTF-8") : null;
+    query_pairs.get(key).add(value);
+  }
+  return query_pairs;
+}
 
 }
