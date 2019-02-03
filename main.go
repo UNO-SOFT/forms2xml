@@ -20,14 +20,14 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -41,7 +41,6 @@ import (
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/pkg/errors"
 	"github.com/rjeczalik/notify"
-	"github.com/tgulacsi/go/httpclient"
 	"github.com/tgulacsi/go/iohlp"
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/alecthomas/kingpin.v2"
@@ -65,7 +64,7 @@ func Main() error {
 		jdapiURLs = append(jdapiURLs, jdapiURLs[0])
 	}
 
-	var concurrency = 8
+	var concurrency = 4
 	formsLibPath, display := os.Getenv("FORMS_PATH"), os.Getenv("DISPLAY")
 	if formsLibPath == "" {
 		formsLibPath = filepath.Join(filepath.Dir(os.Getenv("BRUNO_HOME")), "lib")
@@ -114,14 +113,8 @@ func Main() error {
 	}()
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
-	var converter Converter
-	if strings.Contains(jdapiURLs[0], "@") || strings.Contains(jdapiURLs[0], "/") && !strings.HasPrefix(jdapiURLs[0], "http") {
-		converter = &javaRunner{DbConn: jdapiURLs[0], FormsLibPath: formsLibPath, Display: display,
-			globalCtx: ctx}
-		defer (converter.(io.Closer)).Close()
-	} else {
-		converter = newHTTPClient(jdapiURLs)
-	}
+	jr := newJavaRunner(ctx, jdapiURLs[0], formsLibPath, display, 0, concurrency)
+	converter := Converter(jr)
 	log.Println("converter:", converter)
 
 	switch cmd {
@@ -294,20 +287,20 @@ func convertFiles(ctx context.Context, converter Converter, dst, src string) err
 	var err error
 	if src != "" && src != "-" {
 		return converter.ConvertFiles(ctx, dst, src)
-	} else {
-		var a [1024]byte
-		n, err := io.ReadAtLeast(inp, a[:], 4)
-		if err != nil {
-			return errors.Wrap(err, "readAtLeast stdin")
-		}
-		if bytes.HasPrefix(bytes.TrimSpace(a[:n]), []byte("<?xml")) {
-			mimeType = "application/xml"
-		}
-		inp = struct {
-			io.Reader
-			io.Closer
-		}{io.MultiReader(bytes.NewReader(a[:n]), inp), inp}
 	}
+
+	var a [1024]byte
+	n, err := io.ReadAtLeast(inp, a[:], 4)
+	if err != nil {
+		return errors.Wrap(err, "readAtLeast stdin")
+	}
+	if bytes.HasPrefix(bytes.TrimSpace(a[:n]), []byte("<?xml")) {
+		mimeType = "application/xml"
+	}
+	inp = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(a[:n]), inp), inp}
 	defer inp.Close()
 
 	log.Println(src, mimeType)
@@ -328,63 +321,85 @@ func convertFiles(ctx context.Context, converter Converter, dst, src string) err
 
 type javaRunner struct {
 	DbConn, Display, FormsLibPath  string
+	MaxRetries                     int
 	mu                             sync.Mutex
 	classes, classpath, oracleHome string
 
-	globalCtx context.Context
-	cancel    context.CancelFunc
-	request   io.Writer
-	answer    *bufio.Scanner
+	clients chan HTTPClient
 }
 
-func (jr *javaRunner) Close() error {
-	jr.mu.Lock()
-	err := jr.stop()
-	jr.mu.Unlock()
-	return errors.WithMessage(err, "Close")
+type HTTPClient struct {
+	*retryablehttp.Client
+	Cancel context.CancelFunc
+	URL    string
+	ErrBuf *strings.Builder
 }
 
-func (jr *javaRunner) stop() error {
-	cancel, classes := jr.cancel, jr.classes
-	jr.classes, jr.classpath = "", ""
-	jr.cancel, jr.request, jr.answer = nil, nil, nil
-	if cancel != nil {
-		cancel()
-	}
-	if classes != "" {
-		os.RemoveAll(classes)
+func (cl HTTPClient) Close() error {
+	if cl.Cancel != nil {
+		cl.Cancel()
 	}
 	return nil
 }
 
-func (jr *javaRunner) start() error {
+func newJavaRunner(ctx context.Context, conn, formsLibPath, display string,
+	maxRetries, concurrency int) *javaRunner {
+	if concurrency == 0 {
+		concurrency = 2
+	}
+	if maxRetries == 0 {
+		maxRetries = 3
+	}
+	jr := javaRunner{
+		DbConn: conn, FormsLibPath: formsLibPath, Display: display,
+		clients:    make(chan HTTPClient, concurrency),
+		MaxRetries: maxRetries,
+	}
+	go func() {
+		for {
+			cl, err := jr.start(ctx)
+			if err != nil {
+				log.Printf("start: %v", err)
+				time.Sleep(3 * time.Second)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case jr.clients <- cl:
+			}
+		}
+	}()
+	return &jr
+}
+
+func (jr *javaRunner) start(ctx context.Context) (cl HTTPClient, err error) {
 	if jr.classpath == "" {
 		statikFS, err := fs.New()
 		if err != nil {
-			return errors.Wrap(err, "open statik fs")
+			return cl, errors.Wrap(err, "open statik fs")
 		}
 		if jr.classes, err = ioutil.TempDir("", "forms2xml-classes-"); err != nil {
 			if err != nil {
-				return errors.Wrap(err, "create temp dir for classes")
+				return cl, errors.Wrap(err, "create temp dir for classes")
 			}
 		}
 
 		for _, fn := range []string{"/unosoft/forms/Serve$ConvertHandler.class", "/unosoft/forms/Serve.class"} {
 			b, err := fs.ReadFile(statikFS, fn)
 			if err != nil {
-				return errors.Wrap(err, "read "+fn)
+				return cl, errors.Wrap(err, "read "+fn)
 			}
 			fn = filepath.Join(jr.classes, fn)
 			os.MkdirAll(filepath.Dir(fn), 0755)
 			if err = ioutil.WriteFile(fn, b, 0644); err != nil {
-				return errors.Wrap(err, "write "+fn)
+				return cl, errors.Wrap(err, "write "+fn)
 			}
 		}
 		if jr.oracleHome == "" {
 			cmd := exec.Command("find", "/oracle", "-type", "f", "-name", "frmjdapi.jar")
 			b, _ := cmd.Output()
 			if err != nil && len(b) == 0 {
-				return errors.Wrapf(err, "%v", cmd.Args)
+				return cl, errors.Wrapf(err, "%v", cmd.Args)
 			}
 			jr.oracleHome = filepath.Dir(filepath.Dir(string(bytes.SplitN(b, []byte("\n"), 2)[0])))
 		}
@@ -395,12 +410,17 @@ func (jr *javaRunner) start() error {
 	}
 	log.Println("classpath:", jr.classpath)
 
-	ctx, cancel := context.WithCancel(jr.globalCtx)
-	cmd := exec.CommandContext(ctx, "java", "-cp", jr.classpath,
-		"-Djava.library.path="+filepath.Join(jr.oracleHome, "lib"),
-		"-Dforms.lib.path="+jr.FormsLibPath,
-		"-Dforms.db.conn="+jr.DbConn,
-		"unosoft.forms.Serve", "-")
+	netAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		return cl, err
+	}
+	l, err := net.ListenTCP("tcp", netAddr)
+	if err != nil {
+		return cl, err
+	}
+	addr := l.Addr().(*net.TCPAddr).String()
+	l.Close()
+
 	env := os.Environ()
 	for i := 0; i < len(env); i++ {
 		e := env[i]
@@ -410,164 +430,137 @@ func (jr *javaRunner) start() error {
 			i--
 		} else {
 			switch e[:i] {
-			case "TERM", "DISPLAY", "PATH", "FORMS_PATH", "LD_LIBRARY_PATH":
+			case "TERM", "DISPLAY", "PATH", "FORMS_PATH", "ORACLE_HOME", "LD_LIBRARY_PATH":
 				env[i] = env[0]
 				env = env[1:]
 				i--
 			}
 		}
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	cmd := exec.CommandContext(ctx, "java", "-cp", jr.classpath,
+		"-Djava.library.path="+filepath.Join(jr.oracleHome, "lib"),
+		"-Dforms.lib.path="+jr.FormsLibPath,
+		"-Dforms.db.conn="+jr.DbConn,
+		"unosoft.forms.Serve", addr)
 	cmd.Env = append(os.Environ(),
 		"DISPLAY="+jr.Display,
 		"TERM=xterm",
 		"FORMS_PATH="+jr.FormsLibPath,
-		"PATH="+filepath.Join(jr.oracleHome, "bin")+":"+os.Getenv("PATH"),
+		"PATH="+filepath.Join(jr.oracleHome, "bin")+":/usr/lib64/qt-3.3/bin:"+os.Getenv("PATH"),
+		"ORACLE_HOME="+jr.oracleHome,
 		"LD_LIBRARY_PATH="+filepath.Join(jr.oracleHome, "bin")+":"+filepath.Join(jr.oracleHome, "lib")+":"+os.Getenv("LD_LIBRARY_PATH"),
 	)
-	log.Println(cmd.Env[len(cmd.Env)-4:])
+	log.Println(cmd.Env[len(cmd.Env)-5:])
 	log.Println(cmd.Args)
-	cmd.Stderr = os.Stderr
-	jr.cancel = cancel
-	{
-		pr, pw := io.Pipe()
-		cmd.Stdin, jr.request = pr, pw
-		go func() {
-			<-ctx.Done()
-			pw.CloseWithError(ctx.Err())
-		}()
-	}
-	{
-		pr, pw := io.Pipe()
-		jr.answer, cmd.Stdout = bufio.NewScanner(pr), pw
-		go func() {
-			<-ctx.Done()
-			pw.CloseWithError(ctx.Err())
-		}()
-	}
-	return cmd.Start()
-}
+	cl.ErrBuf = &strings.Builder{}
+	cmd.Stderr = cl.ErrBuf
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
 
-func (jr *javaRunner) ConvertFiles(ctx context.Context, dst, src string) error {
-	jr.mu.Lock()
-	defer jr.mu.Unlock()
-	if jr.request == nil {
-		if err := jr.start(); err != nil {
-			return errors.WithMessage(err, "start")
-		}
+	cl.Cancel = func() {
+		log.Println("CANCEL " + addr)
+		cancel()
 	}
-	if _, err := fmt.Fprintf(jr.request, "%s %s\n", src, dst); err != nil {
-		jr.stop()
-		return errors.Wrap(err, "write request")
-	}
-	grp, ctx := errgroup.WithContext(ctx)
-	grp.Go(func() error {
-		for jr.answer.Scan() {
-			line := jr.answer.Bytes()
-			if bytes.HasPrefix(line, []byte("ERR ")) {
-				return errors.New(string(line[4:]))
-			}
-			if bytes.HasPrefix(line, []byte("OK+ ")) {
-				log.Println(string(line[4:]))
-				return nil
-			}
-		}
-		return errors.New("no answer")
-	})
-	return grp.Wait()
-}
-func (jr *javaRunner) Convert(ctx context.Context, w io.Writer, r io.Reader, mimeType string) error {
-	ext, want := "fmb", "xml"
-	if mimeType == "application/xml" || mimeType == "text/xml" {
-		ext, want = want, ext
-	}
-	fh, err := ioutil.TempFile("", "forms2xml-*."+ext)
-	if err != nil {
-		return errors.Wrap(err, "create temp file")
-	}
-	defer os.Remove(fh.Name())
-	want = fh.Name() + "." + want
-	if _, err = io.Copy(fh, r); err != nil {
-		return errors.Wrap(err, "copy to "+fh.Name())
-	}
-	if err = fh.Close(); err != nil {
-		return errors.Wrap(err, "close "+fh.Name())
-	}
-	if err = jr.ConvertFiles(ctx, want, fh.Name()); err != nil {
-		return errors.WithMessage(err, "convertFiles")
-	}
-	if fh, err = os.Open(want); err != nil {
-		return errors.Wrap(err, "open "+want)
-	}
-	_, err = io.Copy(w, fh)
-	return errors.Wrap(err, "copy from "+fh.Name())
-}
-
-type httpClient struct {
-	Client *retryablehttp.Client
-	URLs   []string
-}
-
-func newHTTPClient(urls []string) httpClient {
-	cl := httpclient.New("jdapi")
-	cl.RequestLogHook = func(logger retryablehttp.Logger, req *http.Request, nth int) {
+	cl.Client = retryablehttp.NewClient()
+	cl.Client.RetryMax = 1
+	cl.Client.RequestLogHook = func(logger retryablehttp.Logger, req *http.Request, nth int) {
 		if nth > 0 {
 			logger.Printf("REQUEST[%d] to %q with %q", nth, req.URL, req.Header)
 		}
 	}
-	return httpClient{Client: cl, URLs: urls}
+	cl.URL = "http://" + addr
+
+	return cl, cmd.Start()
 }
 
-func (cl httpClient) Convert(ctx context.Context, w io.Writer, r io.Reader, mimeType string) error {
-	URL := cl.URLs[0]
-	if len(cl.URLs) > 1 && mimeType == "application/xml" {
-		URL = cl.URLs[1]
-	}
+func (jr *javaRunner) NewClient(ctx context.Context) HTTPClient {
+	cl := <-jr.clients
+	go func() { <-ctx.Done(); cl.Cancel() }()
+	return cl
+}
 
-	b, err := ioutil.ReadAll(r)
+func (jr *javaRunner) Convert(ctx context.Context, w io.Writer, r io.Reader, mimeType string) error {
+	b, err := iohlp.ReadAll(r, 1<<20)
 	if err != nil {
 		return errors.Wrap(err, "read all")
 	}
-	req, err := retryablehttp.NewRequest("POST", URL, bytes.NewReader(b))
-	if err != nil {
-		return errors.Wrap(err, URL)
+	var resp *http.Response
+	for i := 0; i < 2; i++ {
+		cl := jr.NewClient(ctx)
+		URL := cl.URL
+		req, reqErr := retryablehttp.NewRequest("POST", URL, b)
+		if reqErr != nil {
+			return errors.Wrap(reqErr, URL)
+		}
+		req.Header.Set("Content-Length", strconv.Itoa(len(b)))
+		req.Header.Set("Content-Type", mimeType)
+		req.Header.Set("Accept", "*/*")
+		if resp, err = cl.Do(req.WithContext(ctx)); err == nil {
+			defer cl.Close()
+			break
+		}
+		cl.Close()
+		err = errors.WithMessage(errors.Wrap(err, cl.ErrBuf.String()), URL)
+		log.Println(err)
+		time.Sleep(1 * time.Second)
 	}
-	req.Header.Set("Content-Length", strconv.Itoa(len(b)))
-	req.Header.Set("Content-Type", mimeType)
-	req.Header.Set("Accept", "*/*")
-	resp, err := cl.Client.Do(req.WithContext(ctx))
+	var status, URL string
+	if resp != nil {
+		status = resp.Status
+		if resp.Request != nil {
+			URL = resp.Request.URL.String()
+		}
+		defer resp.Body.Close()
+	}
+	log.Printf("POST[%s] %d bytes to %q: %s: %v", mimeType, len(b), URL, status, err)
 	if err != nil {
 		return errors.Wrapf(err, "POST to %q with %q", URL, mimeType)
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		b, _ := iohlp.ReadAll(resp.Body, 1<<20)
 		return errors.Wrap(errors.New(resp.Status), string(b))
 	}
-	if _, err = io.Copy(w, resp.Body); err != nil {
-		return errors.Wrap(err, "copy response")
+	fn := strings.TrimPrefix(resp.Header.Get("Location"), "file://")
+	if fn == "" {
+		_, err = io.Copy(w, resp.Body)
+		return errors.Wrap(err, "copying from response")
 	}
-	return nil
+	fh, err := os.Open(fn)
+	if err != nil {
+		return errors.Wrap(err, resp.Header.Get("Location"))
+	}
+	defer fh.Close()
+	os.Remove(fh.Name())
+	log.Printf("copying from %q...", fh.Name())
+	n, err := io.Copy(w, fh)
+	log.Printf("copied %d bytes: %v", n, err)
+	return errors.Wrap(err, "copy response")
 }
 
-func (cl httpClient) ConvertFiles(ctx context.Context, dst, src string) error {
-	mimeType := "application/xml"
-	if strings.HasSuffix(src, ".fmb") {
-		mimeType = "application/x-oracle-forms"
+func (jr *javaRunner) ConvertFiles(ctx context.Context, dst, src string) error {
+	var resp *http.Response
+	for i := 0; i < jr.MaxRetries; i++ {
+		cl := jr.NewClient(ctx)
+		URL := cl.URL + "?src=" + url.QueryEscape(src) + "&dst=" + url.QueryEscape(dst)
+		req, err := retryablehttp.NewRequest("GET", URL, nil)
+		if err != nil {
+			return errors.Wrap(err, URL)
+		}
+		if resp, err = cl.Do(req.WithContext(ctx)); err == nil {
+			defer cl.Close()
+			break
+		}
+		cl.Close()
+		err = errors.WithMessage(errors.Wrap(err, cl.ErrBuf.String()), URL)
+		log.Println(err)
+		time.Sleep(1 * time.Second)
 	}
-	inp, err := os.Open(src)
-	if err != nil {
-		return errors.Wrap(err, "open "+src)
+	defer resp.Body.Close()
+	if resp.StatusCode != 201 {
+		b, _ := iohlp.ReadAll(resp.Body, 1<<20)
+		return errors.Wrap(errors.New(resp.Status), string(b))
 	}
-	defer inp.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		return errors.Wrap(err, "create "+dst)
-	}
-	defer out.Close()
-	if err = cl.Convert(ctx, out, inp, mimeType); err != nil {
-		return errors.WithMessage(err, "convert")
-	}
-	return out.Close()
+	return nil
 }
 
 type Converter interface {
