@@ -81,6 +81,9 @@ func Main() error {
 	xmlSrc := cmdXML.Arg("src", "source file").ExistingFile()
 	xmlDst := cmdXML.Arg("dst", "destination file").String()
 
+	cmdServe := app.Command("serve", "serve (start java only)")
+	cmdServeAddress := cmdServe.Arg("address", "address to listen on").String()
+
 	cmdTransform := app.Command("transform", "transform the XML")
 	tranSrc := cmdTransform.Arg("src", "source file").ExistingFile()
 	tranDst := cmdTransform.Arg("dst", "destination file").String()
@@ -123,6 +126,10 @@ func Main() error {
 		err := convertFiles(ctx, converter, *xmlDst, *xmlSrc)
 		cancel()
 		return err
+
+	case cmdServe.FullCommand():
+		http.Handle("/", jr)
+		return http.ListenAndServe(*cmdServeAddress, nil)
 
 	case cmdTransform.FullCommand():
 		return transformFiles(*tranDst, *tranSrc)
@@ -493,32 +500,20 @@ func (jr *javaRunner) Convert(ctx context.Context, w io.Writer, r io.Reader, mim
 	if err != nil {
 		return errors.Wrap(err, "read all")
 	}
-	var resp *http.Response
-	for i := 0; i < 2; i++ {
-		cl := jr.NewClient(ctx)
-		URL := cl.URL
-		req, reqErr := retryablehttp.NewRequest("POST", URL, b)
-		if reqErr != nil {
-			return errors.Wrap(reqErr, URL)
+	resp, err := jr.do(ctx, func(URL string) (*retryablehttp.Request, error) {
+		req, err := retryablehttp.NewRequest("POST", URL, b)
+		if err != nil {
+			return nil, errors.Wrap(err, URL)
 		}
 		req.Header.Set("Content-Length", strconv.Itoa(len(b)))
 		req.Header.Set("Content-Type", mimeType)
 		req.Header.Set("Accept", "*/*")
-		if resp, err = cl.Do(req.WithContext(ctx)); err == nil {
-			defer func() {
-				select {
-				case jr.freeClients <- cl:
-				default:
-					cl.Close()
-				}
-			}()
-			break
-		}
-		cl.Close()
-		err = errors.WithMessage(errors.Wrap(err, cl.ErrBuf.String()), URL)
-		log.Println(err)
-		time.Sleep(1 * time.Second)
+		return req, nil
+	})
+	if err != nil {
+		return err
 	}
+
 	var status, URL string
 	if resp != nil {
 		status = resp.Status
@@ -552,16 +547,16 @@ func (jr *javaRunner) Convert(ctx context.Context, w io.Writer, r io.Reader, mim
 	return errors.Wrap(err, "copy response")
 }
 
-func (jr *javaRunner) ConvertFiles(ctx context.Context, dst, src string) error {
+func (jr *javaRunner) do(ctx context.Context, makeRequest func(address string) (*retryablehttp.Request, error)) (*http.Response, error) {
+	var err error
 	var resp *http.Response
 	for i := 0; i < jr.MaxRetries; i++ {
 		cl := jr.NewClient(ctx)
-		URL := cl.URL + "?src=" + url.QueryEscape(src) + "&dst=" + url.QueryEscape(dst)
-		req, err := retryablehttp.NewRequest("GET", URL, nil)
-		if err != nil {
-			return errors.Wrap(err, URL)
+		var req *retryablehttp.Request
+		if req, err = makeRequest(cl.URL); err != nil {
+			return nil, errors.WithMessage(err, cl.URL)
 		}
-		if resp, err = cl.Do(req.WithContext(ctx)); err == nil {
+		if resp, err = cl.Do(req); err == nil {
 			defer func() {
 				select {
 				case jr.freeClients <- cl:
@@ -569,12 +564,23 @@ func (jr *javaRunner) ConvertFiles(ctx context.Context, dst, src string) error {
 					cl.Close()
 				}
 			}()
-			break
+			return resp, nil
 		}
 		cl.Close()
-		err = errors.WithMessage(errors.Wrap(err, cl.ErrBuf.String()), URL)
+		err = errors.Wrap(err, cl.ErrBuf.String())
 		log.Println(err)
 		time.Sleep(1 * time.Second)
+	}
+	return nil, err
+}
+
+func (jr *javaRunner) ConvertFiles(ctx context.Context, dst, src string) error {
+	resp, err := jr.do(ctx, func(URL string) (*retryablehttp.Request, error) {
+		URL += "?src=" + url.QueryEscape(src) + "&dst=" + url.QueryEscape(dst)
+		return retryablehttp.NewRequest("GET", URL, nil)
+	})
+	if err != nil {
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 201 {
@@ -582,6 +588,29 @@ func (jr *javaRunner) ConvertFiles(ctx context.Context, dst, src string) error {
 		return errors.Wrap(errors.New(resp.Status), string(b))
 	}
 	return nil
+}
+
+func (jr *javaRunner) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	b, err := iohlp.ReadAll(r.Body, 1<<20)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	uri := r.URL.RequestURI()
+	resp, err := jr.do(r.Context(), func(URL string) (*retryablehttp.Request, error) {
+		URL += uri
+		return retryablehttp.NewRequest(r.Method, URL, b)
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+	for k, vv := range resp.Header {
+		w.Header()[k] = vv
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
 type Converter interface {
