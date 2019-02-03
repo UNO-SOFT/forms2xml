@@ -325,7 +325,8 @@ type javaRunner struct {
 	mu                             sync.Mutex
 	classes, classpath, oracleHome string
 
-	clients chan HTTPClient
+	newClients  chan HTTPClient
+	freeClients chan HTTPClient
 }
 
 type HTTPClient struct {
@@ -344,7 +345,7 @@ func (cl HTTPClient) Close() error {
 
 func newJavaRunner(ctx context.Context, conn, formsLibPath, display string,
 	maxRetries, concurrency int) *javaRunner {
-	if concurrency == 0 {
+	if concurrency <= 1 {
 		concurrency = 2
 	}
 	if maxRetries == 0 {
@@ -352,8 +353,9 @@ func newJavaRunner(ctx context.Context, conn, formsLibPath, display string,
 	}
 	jr := javaRunner{
 		DbConn: conn, FormsLibPath: formsLibPath, Display: display,
-		clients:    make(chan HTTPClient, concurrency),
-		MaxRetries: maxRetries,
+		newClients:  make(chan HTTPClient, concurrency/2),
+		freeClients: make(chan HTTPClient, concurrency/2),
+		MaxRetries:  maxRetries,
 	}
 	go func() {
 		for {
@@ -365,7 +367,7 @@ func newJavaRunner(ctx context.Context, conn, formsLibPath, display string,
 			select {
 			case <-ctx.Done():
 				return
-			case jr.clients <- cl:
+			case jr.newClients <- cl:
 			}
 		}
 	}()
@@ -474,7 +476,14 @@ func (jr *javaRunner) start(ctx context.Context) (cl HTTPClient, err error) {
 }
 
 func (jr *javaRunner) NewClient(ctx context.Context) HTTPClient {
-	cl := <-jr.clients
+	var cl HTTPClient
+	select {
+	case cl = <-jr.freeClients:
+	default:
+	}
+	if cl.Client == nil {
+		cl = <-jr.newClients
+	}
 	go func() { <-ctx.Done(); cl.Cancel() }()
 	return cl
 }
@@ -496,7 +505,13 @@ func (jr *javaRunner) Convert(ctx context.Context, w io.Writer, r io.Reader, mim
 		req.Header.Set("Content-Type", mimeType)
 		req.Header.Set("Accept", "*/*")
 		if resp, err = cl.Do(req.WithContext(ctx)); err == nil {
-			defer cl.Close()
+			defer func() {
+				select {
+				case jr.freeClients <- cl:
+				default:
+					cl.Close()
+				}
+			}()
 			break
 		}
 		cl.Close()
@@ -547,7 +562,13 @@ func (jr *javaRunner) ConvertFiles(ctx context.Context, dst, src string) error {
 			return errors.Wrap(err, URL)
 		}
 		if resp, err = cl.Do(req.WithContext(ctx)); err == nil {
-			defer cl.Close()
+			defer func() {
+				select {
+				case jr.freeClients <- cl:
+				default:
+					cl.Close()
+				}
+			}()
 			break
 		}
 		cl.Close()
