@@ -332,6 +332,9 @@ func (jr *javaRunner) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if resp.StatusCode == 201 {
 		if loc := strings.TrimPrefix(resp.Header.Get("Location"), "file://"); loc != "" {
 			if fh, err := os.Open(loc); err == nil {
+				if strings.HasPrefix(fh.Name(), os.TempDir()) {
+					os.Remove(fh.Name())
+				}
 				w.WriteHeader(resp.StatusCode)
 				io.Copy(w, fh)
 				fh.Close()
