@@ -1,4 +1,4 @@
-// Copyright 2018 Tamás Gulácsi
+// Copyright 2019 Tamás Gulácsi
 //
 //
 //    Licensed under the Apache License, Version 2.0 (the "License");
@@ -164,7 +164,9 @@ public class Serve {
 				if( !fromXML ) {
 					// fmb -> XML
 					oracle.xml.parser.v2.XMLDocument xml = null;
-						xml = (new Forms2XML(src)).dumpModule();
+					System.err.println("converting "+src);
+					xml = (new Forms2XML(src)).dumpModule();
+					System.err.println("converted "+src);
 					//dst = File.createTempFile("fmb2xml-", ".xml");
 					if( dst == null ) {
 						t.getResponseHeaders().set("Content-Type", "application/xml");
