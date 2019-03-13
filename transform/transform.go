@@ -197,7 +197,6 @@ func (P *FormsXMLProcessor) processStartElement(enc *xml.Encoder, st *xml.StartE
 	P.scaleElt(st)
 	P.fixParentModule(st)
 	P.subclassRootwindow(st)
-	//P.fixContentCanvas(st)
 	P.fixBadItemType(st)
 	P.trimSpaces(st)
 	P.fixVAs(st)
@@ -249,7 +248,7 @@ var stackedCanvasAttrs = map[string]string{
 	"ParentType":          "4",
 	"ParentName":          "C_CONTENT",
 	"ParentModule":        "BR_FLIB",
-	"VisualAttributeName": "NORMAL",
+	"VisualAttributeName": "NORMAL_CANVAS",
 	"ParentFilename":      "BR_FLIB.fmb",
 	"ParentModuleType":    "12",
 }
@@ -436,8 +435,6 @@ func (P *FormsXMLProcessor) subclassRootwindow(st *xml.StartElement) {
 	}
 	st.Attr = setAttrs(st.Attr, RootwindowSet)
 }
-
-//func (P *FormsXMLProcessor) fixContentCanvas(st *xml.StartElement) {
 
 var RequiredLibs = []string{"BR_PROCEDURE_LIB"}
 
