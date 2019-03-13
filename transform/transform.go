@@ -1,4 +1,4 @@
-// Copyright 2018 Tamás Gulácsi
+// Copyright 2019 Tamás Gulácsi
 //
 //
 //    Licensed under the Apache License, Version 2.0 (the "License");
@@ -389,6 +389,7 @@ var RootwindowSet = map[string]string{
 	"ParentName":          "W_MAIN",
 	"ParentFilename":      "BR_FLIB.fmb",
 	"ParentModuleType":    "12",
+	"ParentType":          "41",
 	"VisualAttributeName": "NORMAL",
 	"Name":                "W_MAIN",
 	//<Window Name="W_MAIN" ShowHorizontalScrollbar="false" MinimizeAllowed="false" Width="1010" ResizeAllowed="false" PrimaryCanvas="C_CONTENT" XPosition="0" YPosition="20" MaximizeAllowed="false" DirtyInfo="true" VisualAttributeName="NORMAL" Modal="true" MoveAllowed="false" ShowVerticalScrollbar="false" Height="601"/>
