@@ -524,9 +524,9 @@ func (P *FormsXMLProcessor) fixVAs(st *xml.StartElement) {
 
 	switch st.Name.Local {
 	case "Block":
-		st.Attr = setAttr(st.Attr, "RecordVisualAttributeGroupName", "SELECT")
+		st.Attr = setAttr(st.Attr, "RecordVisualAttributeGroupName", "NORMAL")
 
-	case "VisualAttribute":
+	case "NORMAL":
 		i := findAttr(st.Attr, "Name")
 		rnev := st.Attr[i].Value
 		if R, ok := VAReplace[rnev]; ok {
