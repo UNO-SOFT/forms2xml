@@ -31,7 +31,10 @@ const DefaultCellWidth, DefaultCellHeight = 12, 24
 
 var DefaultUsedVisualAttributes = []string{
 	"NORMAL_ITEM", "SELECT", "NORMAL_PROMPT", "NORMAL",
-	"NORMAL_CANVAS",
+	"NORMAL_CANVAS", "NORMAL_CHECKBOX", "NORMAL_CHECKBOX12", "INACTIVE_CHECKBOX",
+	"ITEM_ENABLE", "ITEM_DISABLE", "TEXT_NONCURRENT", "DISABLE", "MENU_NORMAL",
+	"NORMAL_TITLE", "NORMAL_TITLE12", "PROMPT_TITLE", "PROMPT_TITLE12", "PROMPT_ITEM",
+	"PROMPT_ITEM12",
 }
 
 type FormsXMLProcessor struct {
@@ -394,8 +397,8 @@ var RootwindowSet = map[string]string{
 	//<Window Name="W_MAIN" ShowHorizontalScrollbar="false" MinimizeAllowed="false" Width="1010" ResizeAllowed="false" PrimaryCanvas="C_CONTENT" XPosition="0" YPosition="20" MaximizeAllowed="false" DirtyInfo="true" VisualAttributeName="NORMAL" Modal="true" MoveAllowed="false" ShowVerticalScrollbar="false" Height="601"/>
 	"ShowHorizontalScrollbar": "false", "ShowVerticalScrollbar": "false",
 	"MinimizeAllowed": "false", "MoveAllowed": "false", "ResizeAllowed": "false",
-	"PrimaryCanvas": "C_CONTENT",
-	"Width":         "1010", "Height": "601",
+	//"PrimaryCanvas": "C_CONTENT", // Ne írj - KL 2019-03-20
+	"Width": "1010", "Height": "601",
 	"XPosition": "0", "YPosition": "0",
 }
 var RootwindowDel = []string{
