@@ -82,6 +82,40 @@ func newJavaRunner(ctx context.Context, conn, formsLibPath, display string,
 	return &jr
 }
 
+/*
+export CT_JAVA_HOME="/oracle/fmw12c/product/jdk"
+export DISPLAY="aix-dev-ab7.unosoft.local:0"
+export DOMAIN_HOME="/oracle/fmw12c/config/domains/bruno"
+export FORMS_API_TK_BYPASS="false"
+export FORMS_INSTANCE="/oracle/fmw12c/config/domains/bruno/config/fmwconfig/components/FORMS/instances/forms1"
+export FORMS_PATH="/home/aegon/dev/lib"
+export HISTSIZE="1000"
+export HOME="/home/oracle"
+export HOSTNAME="lnx-dev-ae7.unosoft.local"
+export LANG="en_US.iso88592"
+export LD_LIBRARY_PATH="/oracle/fmw12c/product/jdk/jre/lib/amd64/native_threads:/oracle/fmw12c/product/jdk/jre/lib/amd64/server:/oracle/fmw12c/product/jdk/jre/lib/amd64:/oracle/fmw12c/product/wlserver/../lib"
+export LOGNAME="oracle"
+export LS_COLORS="rs=0:di=01;34:ln=01;36:mh=00:pi=40;33:so=01;35:do=01;35:bd=40;33;01:cd=40;33;01:or=40;31;01:mi=01;05;37;41:su=37;41:sg=30;43:ca=30;41:tw=30;42:ow=34;42:st=37;44:ex=01;32:*.tar=01;31:*.tgz=01;31:*.arc=01;31:*.arj=01;31:*.taz=01;31:*.lha=01;31:*.lz4=01;31:*.lzh=01;31:*.lzma=01;31:*.tlz=01;31:*.txz=01;31:*.tzo=01;31:*.t7z=01;31:*.zip=01;31:*.z=01;31:*.Z=01;31:*.dz=01;31:*.gz=01;31:*.lrz=01;31:*.lz=01;31:*.lzo=01;31:*.xz=01;31:*.bz2=01;31:*.bz=01;31:*.tbz=01;31:*.tbz2=01;31:*.tz=01;31:*.deb=01;31:*.rpm=01;31:*.jar=01;31:*.war=01;31:*.ear=01;31:*.sar=01;31:*.rar=01;31:*.alz=01;31:*.ace=01;31:*.zoo=01;31:*.cpio=01;31:*.7z=01;31:*.rz=01;31:*.cab=01;31:*.jpg=01;35:*.jpeg=01;35:*.gif=01;35:*.bmp=01;35:*.pbm=01;35:*.pgm=01;35:*.ppm=01;35:*.tga=01;35:*.xbm=01;35:*.xpm=01;35:*.tif=01;35:*.tiff=01;35:*.png=01;35:*.svg=01;35:*.svgz=01;35:*.mng=01;35:*.pcx=01;35:*.mov=01;35:*.mpg=01;35:*.mpeg=01;35:*.m2v=01;35:*.mkv=01;35:*.webm=01;35:*.ogm=01;35:*.mp4=01;35:*.m4v=01;35:*.mp4v=01;35:*.vob=01;35:*.qt=01;35:*.nuv=01;35:*.wmv=01;35:*.asf=01;35:*.rm=01;35:*.rmvb=01;35:*.flc=01;35:*.avi=01;35:*.fli=01;35:*.flv=01;35:*.gl=01;35:*.dl=01;35:*.xcf=01;35:*.xwd=01;35:*.yuv=01;35:*.cgm=01;35:*.emf=01;35:*.axv=01;35:*.anx=01;35:*.ogv=01;35:*.ogx=01;35:*.aac=01;36:*.au=01;36:*.flac=01;36:*.mid=01;36:*.midi=01;36:*.mka=01;36:*.mp3=01;36:*.mpc=01;36:*.ogg=01;36:*.ra=01;36:*.wav=01;36:*.axa=01;36:*.oga=01;36:*.spx=01;36:*.xspf=01;36:"
+export MAIL="/var/spool/mail/tgulacsi"
+export OLDPWD
+export ORACLE_HOME="/oracle/fmw12c/product/wlserver/.."
+export O_JDK_HOME="/oracle/fmw12c/product/jdk"
+export PATH="/sbin:/bin:/usr/sbin:/usr/bin"
+export PWD="/home/aegon/dev"
+export SHELL="/usr/bin/bash"
+export SHLVL="1"
+export SUDO_COMMAND="/bin/env FORMS_PATH=/home/aegon/dev/lib DISPLAY=aix-dev-ab7.unosoft.local:0 FORMS_API_TK_BYPASS=false /oracle/fmw12c/config/domains/bruno/./config/fmwconfig/components/FORMS/instances/forms1/bin/frmxml2f.sh userid=bruno_owner/xxx@ae7_dev overwrite=yes /tmp/x.xml /tmp/x.fmb"
+export SUDO_GID="10508"
+export SUDO_UID="11056"
+export SUDO_USER="tgulacsi"
+export TERM="xterm-256color"
+export TNS_ADMIN="/oracle/fmw12c/config/domains/bruno/config/fmwconfig"
+export USER="oracle"
+export USERNAME="oracle"
+export XDG_SESSION_ID="3798"
++ /oracle/fmw12c/product/jdk/bin/java -classpath /oracle/fmw12c/product/wlserver/../jlib/frmjdapi.jar:/oracle/fmw12c/product/wlserver/../jlib/frmxmltools.jar:/oracle/fmw12c/product/wlserver/../oracle_common/modules/oracle.xdk/xmlparserv2.jar oracle.forms.util.xmltools.XML2Forms userid=bruno_owner/xxx@ae7_dev overwrite=yes /tmp/x.xml /tmp/x.fmb
+*/
+
 func (jr *javaRunner) start(ctx context.Context) (cl HTTPClient, err error) {
 	if jr.classpath == "" {
 		statikFS, err := fs.New()
