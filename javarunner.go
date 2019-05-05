@@ -147,10 +147,18 @@ func (jr *javaRunner) start(ctx context.Context) (cl HTTPClient, err error) {
 			}
 			jr.oracleHome = filepath.Dir(filepath.Dir(string(bytes.SplitN(b, []byte("\n"), 2)[0])))
 		}
+		// /oracle/fmw12c/product/jdk/bin/java -classpath /oracle/fmw12c/product/wlserver/../jlib/frmjdapi.jar:/oracle/fmw12c/product/wlserver/../jlib/frmxmltools.jar:/oracle/fmw12c/product/wlserver/../oracle_common/modules/oracle.xdk/xmlparserv2.jar oracle.forms.util.xmltools.XML2Forms userid=bruno_owner/xxx@ae7_dev overwrite=yes /tmp/x.xml /tmp/x.fmb
+
 		jr.classpath = jr.classes + ":" +
 			filepath.Join(jr.oracleHome, "jlib", "frmjdapi.jar") + ":" +
-			filepath.Join(jr.oracleHome, "jlib", "frmxmltools.jar") + ":" +
-			filepath.Join(jr.oracleHome, "lib", "xmlparserv2.jar")
+			filepath.Join(jr.oracleHome, "jlib", "frmxmltools.jar")
+		for _, dn := range []string{"oracle_common/modules/oracle.xdk", "lib"} {
+			fn := filepath.Join(jr.oracleHome, dn, "xmlparserv2.jar")
+			if _, err := os.Stat(fn); err == nil {
+				jr.classpath += ":" + fn
+				break
+			}
+		}
 	}
 	log.Println("classpath:", jr.classpath)
 
