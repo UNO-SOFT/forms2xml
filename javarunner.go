@@ -326,7 +326,7 @@ func (jr *javaRunner) ConvertFiles(ctx context.Context, dst, src string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 201 {
+	if resp.StatusCode >= 400 {
 		b, _ := iohlp.ReadAll(resp.Body, 1<<20)
 		return errors.Wrap(errors.New(resp.Status), string(b))
 	}

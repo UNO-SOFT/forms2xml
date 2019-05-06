@@ -130,8 +130,8 @@ public class Serve {
 				emptyList.add("");
 				String srcName = values.getOrDefault("src", emptyList).get(0);
 				String dstName = values.getOrDefault("dst", emptyList).get(0);
-				src = srcName.isEmpty() ? null : new File(srcName);
-				dst = dstName.isEmpty() ? null : new File(dstName);
+				src = (srcName == null || srcName.isEmpty()) ? null : new File(srcName);
+				dst = (dstName == null || dstName.isEmpty()) ? null : new File(dstName);
 				boolean fromXML = srcName.endsWith(".xml");
 
 				if( t.getRequestMethod().equals("GET") ) {
@@ -139,11 +139,16 @@ public class Serve {
 				} else if( t.getRequestMethod().equals("POST") ) {
 					fromXML = false;
 					String ext = ".fmb";
-					if( t.getRequestHeaders() != null && t.getRequestHeaders().getFirst("Content-Type") != null &&
-						(t.getRequestHeaders().getFirst("Content-Type").equals("application/xml") ||
-							t.getRequestHeaders().getFirst("Accept").equals("application/x-oracle-forms")) ) {
-						ext = ".fmb.xml";
-						fromXML = true;
+					String ct = null;
+					String acc = null;
+					if( t.getRequestHeaders() != null ) {
+						ct = t.getRequestHeaders().getFirst("Content-Type");
+						acc = t.getRequestHeaders().getFirst("Accept");
+						if( (ct == null ? "" : ct).equals("application/xml") ||
+								(acc == null ? "" : acc).equals("application/x-oracle-forms") ) {
+							ext = ".fmb.xml";
+							fromXML = true;
+						}
 					}
 					System.err.println("ext="+ext+" fromXML="+String.valueOf(fromXML));
 
