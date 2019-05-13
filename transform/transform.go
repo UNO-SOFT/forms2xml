@@ -30,12 +30,13 @@ import (
 const DefaultCellWidth, DefaultCellHeight = 12, 24
 
 var DefaultUsedVisualAttributes = []string{
-	"NORMAL_ITEM", "NORMAL_ITEM12", 
-	"SELECT", "NORMAL_PROMPT", "NORMAL",
+	"NORMAL_ITEM", "NORMAL_ITEM12",
+	"SELECT", "SELECT12",
+	"NORMAL_PROMPT", "NORMAL_PROMPT12", "NORMAL",
 	"DISPLAY_ITEM12",
-	"NORMAL_CANVAS", 
-	"NORMAL_TITLE", "NORMAL_TITLE12", 
-	"PROMPT_TITLE", "PROMPT_TITLE12", 
+	"NORMAL_CANVAS",
+	"NORMAL_TITLE", "NORMAL_TITLE12",
+	"PROMPT_TITLE", "PROMPT_TITLE12",
 	"PROMPT_ITEM", "PROMPT_ITEM12",
 }
 
@@ -167,6 +168,9 @@ func (P *FormsXMLProcessor) processStartElement(enc *xml.Encoder, st *xml.StartE
 	case "VisualAttribute":
 		P.addTriggers(enc)
 		delete(P.missingVAs, getAttr(st.Attr, "Name"))
+		if i := findAttr(st.Attr, "Name"); i >= 0 && st.Attr[i].Value == "ITEM_SELECT" {
+			return errSkipElement
+		}
 	case "ModuleParameter":
 		delete(P.missingParams, getAttr(st.Attr, "Name"))
 	case "Window":
@@ -401,7 +405,7 @@ var RootwindowSet = map[string]string{
 	"MinimizeAllowed": "false", "MoveAllowed": "false", "ResizeAllowed": "false",
 	//"PrimaryCanvas": "C_CONTENT", // Ne írj - KL 2019-03-20
 	"Width": "1010", "Height": "601",
-	"XPosition": "0", "YPosition": "0",
+	"XPosition": "0", "YPosition": "20",
 }
 var RootwindowDel = []string{
 	//"Height", "Width",
@@ -500,7 +504,7 @@ var VAReplace = map[string]struct {
 	Names       []string
 }{
 	"ITEM_SELECT": {
-		Replacement: "SELECT",
+		Replacement: "SELECT12",
 		Names:       []string{"RecordVisualAttributeGroupName", "VisualAttributeGroupName"},
 	},
 }
@@ -525,8 +529,8 @@ func (P *FormsXMLProcessor) fixVAs(st *xml.StartElement) {
 	}
 
 	switch st.Name.Local {
-	case "Block":
-		st.Attr = setAttr(st.Attr, "RecordVisualAttributeGroupName", "NORMAL")
+	//case "Block":
+	//	st.Attr = setAttr(st.Attr, "RecordVisualAttributeGroupName", "NORMAL")
 
 	case "NORMAL":
 		i := findAttr(st.Attr, "Name")
