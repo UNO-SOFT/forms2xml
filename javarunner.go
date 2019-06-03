@@ -239,10 +239,11 @@ func (jr *javaRunner) NewClient(ctx context.Context) HTTPClient {
 }
 
 func (jr *javaRunner) Convert(ctx context.Context, w io.Writer, r io.Reader, mimeType string) error {
-	b, err := iohlp.ReadAll(r, 1<<20)
+	b, closer, err := iohlp.ReadAll(r, 1<<20)
 	if err != nil {
 		return errors.Wrap(err, "read all")
 	}
+	defer closer.Close()
 	resp, err := jr.do(ctx, func(URL string) (*retryablehttp.Request, error) {
 		req, err := retryablehttp.NewRequest("POST", URL, b)
 		if err != nil {
@@ -270,8 +271,10 @@ func (jr *javaRunner) Convert(ctx context.Context, w io.Writer, r io.Reader, mim
 		return errors.Wrapf(err, "POST to %q with %q", URL, mimeType)
 	}
 	if resp.StatusCode >= 400 {
-		b, _ := iohlp.ReadAll(resp.Body, 1<<20)
-		return errors.Wrap(errors.New(resp.Status), string(b))
+		b, closer, _ := iohlp.ReadAll(resp.Body, 1<<20)
+		s := string(b)
+		closer.Close()
+		return errors.Wrap(errors.New(resp.Status), s)
 	}
 	fn := strings.TrimPrefix(resp.Header.Get("Location"), "file://")
 	if fn == "" {
@@ -327,18 +330,21 @@ func (jr *javaRunner) ConvertFiles(ctx context.Context, dst, src string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		b, _ := iohlp.ReadAll(resp.Body, 1<<20)
-		return errors.Wrap(errors.New(resp.Status), string(b))
+		b, closer, _ := iohlp.ReadAll(resp.Body, 1<<20)
+		s := string(b)
+		closer.Close()
+		return errors.Wrap(errors.New(resp.Status), s)
 	}
 	return nil
 }
 
 func (jr *javaRunner) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	b, err := iohlp.ReadAll(r.Body, 1<<20)
+	b, closer, err := iohlp.ReadAll(r.Body, 1<<20)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	defer closer.Close()
 	var mimeType string
 	if r.Method == "POST" {
 		mimeType = r.Header.Get("Content-Type")

@@ -108,6 +108,7 @@ func Main() error {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
 	jr := newJavaRunner(ctx, jdapiURLs[0], formsLibPath, display, 0, concurrency)
+	jr.MaxRetries = 2
 	converter := Converter(jr)
 	log.Println("converter:", converter)
 
