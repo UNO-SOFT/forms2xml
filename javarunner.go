@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -14,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -30,7 +28,6 @@ import (
 type javaRunner struct {
 	DbConn, Display, FormsLibPath  string
 	MaxRetries                     int
-	mu                             sync.Mutex
 	classes, classpath, oracleHome string
 
 	newClients  chan HTTPClient
@@ -122,7 +119,7 @@ func (jr *javaRunner) start(ctx context.Context) (cl HTTPClient, err error) {
 		if err != nil {
 			return cl, errors.Wrap(err, "open statik fs")
 		}
-		if jr.classes, err = ioutil.TempDir("", "forms2xml-classes-"); err != nil {
+		if jr.classes, err = os.MkdirTemp("", "forms2xml-classes-"); err != nil {
 			if err != nil {
 				return cl, errors.Wrap(err, "create temp dir for classes")
 			}
@@ -135,7 +132,7 @@ func (jr *javaRunner) start(ctx context.Context) (cl HTTPClient, err error) {
 			}
 			fn = filepath.Join(jr.classes, fn)
 			os.MkdirAll(filepath.Dir(fn), 0755)
-			if err = ioutil.WriteFile(fn, b, 0644); err != nil {
+			if err = os.WriteFile(fn, b, 0644); err != nil {
 				return cl, errors.Wrap(err, "write "+fn)
 			}
 		}
