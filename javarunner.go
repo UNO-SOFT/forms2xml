@@ -1,9 +1,26 @@
+// Copyright 2019, 2025 Tamás Gulácsi
+//
+//
+//    Licensed under the Apache License, Version 2.0 (the "License");
+//    you may not use this file except in compliance with the License.
+//    You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+//    Unless required by applicable law or agreed to in writing, software
+//    distributed under the License is distributed on an "AS IS" BASIS,
+//    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//    See the License for the specific language governing permissions and
+//    limitations under the License.
+
 package main
 
 import (
 	"bytes"
 	"context"
+	"embed"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -20,10 +37,12 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/tgulacsi/go/iohlp"
-
-	_ "github.com/UNO-SOFT/forms2xml/statik"
-	"github.com/rakyll/statik/fs"
 )
+
+//go:generate env OHOME=/oracle/fmw12c/product sh -c "set -x; javac -cp classes:${DOLLAR}OHOME/jlib/frmjdapi.jar:${DOLLAR}OHOME/jlib/frmxmltools.jar:${DOLLAR}OHOME/oracle_common/modules/oracle.xdk/xmlparserv2.jar -d classes src/unosoft/forms/Serve.java"
+
+//go:embed classes
+var classesFS embed.FS
 
 type javaRunner struct {
 	DbConn, Display, FormsLibPath  string
@@ -115,18 +134,18 @@ export XDG_SESSION_ID="3798"
 
 func (jr *javaRunner) start(ctx context.Context) (cl HTTPClient, err error) {
 	if jr.classpath == "" {
-		statikFS, err := fs.New()
-		if err != nil {
-			return cl, errors.Wrap(err, "open statik fs")
-		}
 		if jr.classes, err = os.MkdirTemp("", "forms2xml-classes-"); err != nil {
 			if err != nil {
 				return cl, errors.Wrap(err, "create temp dir for classes")
 			}
 		}
 
-		for _, fn := range []string{"/unosoft/forms/Serve$ConvertHandler.class", "/unosoft/forms/Serve.class"} {
-			b, err := fs.ReadFile(statikFS, fn)
+		FS, err := fs.Sub(classesFS, "classes")
+		if err != nil {
+			return cl, err
+		}
+		for _, fn := range []string{"unosoft/forms/Serve$ConvertHandler.class", "unosoft/forms/Serve.class"} {
+			b, err := fs.ReadFile(FS, fn)
 			if err != nil {
 				return cl, errors.Wrap(err, "read "+fn)
 			}

@@ -1,4 +1,4 @@
-// Copyright 2019 Tamás Gulácsi
+// Copyright 2019, 2025 Tamás Gulácsi
 //
 //
 //    Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,30 +13,27 @@
 //    See the License for the specific language governing permissions and
 //    limitations under the License.
 
-//go:generate env OHOME=/oracle/fmw12c/product sh -c "set -x; javac -cp classes:${DOLLAR}OHOME/jlib/frmjdapi.jar:${DOLLAR}OHOME/jlib/frmxmltools.jar:${DOLLAR}OHOME/oracle_common/modules/oracle.xdk/xmlparserv2.jar -d classes src/unosoft/forms/Serve.java"
-
-//go:generate statik  -m -f -p statik -src classes
-
 package main
 
 import (
 	"bytes"
 	"context"
+	_ "embed"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
-	"github.com/pkg/errors"
+	"github.com/peterbourgon/ff/v4"
+	"github.com/peterbourgon/ff/v4/ffhelp"
 	"github.com/rjeczalik/notify"
 	"golang.org/x/sync/errgroup"
-	"gopkg.in/alecthomas/kingpin.v2"
 
 	"github.com/UNO-SOFT/forms2xml/transform"
 )
@@ -59,102 +56,147 @@ func Main() error {
 	if formsLibPath == "" {
 		formsLibPath = filepath.Join(filepath.Dir(os.Getenv("BRUNO_HOME")), "lib")
 	}
-	app := kingpin.New("forms2xml", "Oracle Forms .fmb <-> .xml with optional conversion")
-	app.Flag("jdapi-src", "SRC Form JDAPI helper HTTP listener URL").
-		Default(jdapiURLs[0]).StringVar(&jdapiURLs[0])
-	app.Flag("jdapi-dst", "DEST Form JDAPI helper HTTP listener URL").
-		Default(jdapiURLs[1]).StringVar(&jdapiURLs[1])
-	app.Flag("forms.lib.path", "FORMS_PATH").Default(formsLibPath).StringVar(&formsLibPath)
-	app.Flag("display", "DISPLAY").Default(display).StringVar(&display)
 
-	cmdXML := app.Command("xml", "convert to-from XML").Default()
-	xmlSrc := cmdXML.Arg("src", "source file").ExistingFile()
-	xmlDst := cmdXML.Arg("dst", "destination file").String()
+	srcDst := func(args []string) (string, string, error) {
+		if len(args) == 0 {
+			return "", "", fmt.Errorf("source file is required")
+		}
+		src := args[0]
+		var dst string
+		if len(args) > 0 {
+			dst = args[1]
+		}
+		return src, dst, nil
+	}
 
-	cmdServe := app.Command("serve", "serve (start java only)")
-	cmdServeAddress := cmdServe.Arg("address", "address to listen on").Required().String()
+	var converter Converter
+	cmdXML := ff.Command{Name: "xml", ShortHelp: "convert to-from XML",
+		Usage: "xml <source file> [destination file]",
+		Exec: func(ctx context.Context, args []string) error {
+			xmlSrc, xmlDst, err := srcDst(args)
+			if err != nil {
+				return err
+			}
+			ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err = convertFiles(ctx, converter, xmlDst, xmlSrc)
+			cancel()
+			return err
+		},
+	}
 
-	cmdTransform := app.Command("transform", "transform the XML")
-	tranSrc := cmdTransform.Arg("src", "source file").ExistingFile()
-	tranDst := cmdTransform.Arg("dst", "destination file").String()
+	var jr *javaRunner
+	cmdServe := ff.Command{Name: "serve", ShortHelp: "serve (start java only)",
+		Usage: "serve <address to listen on>",
+		Exec: func(ctx context.Context, args []string) error {
+			if len(args) == 0 {
+				return fmt.Errorf("address is required")
+			}
+			cmdServeAddress := args[0]
+			http.Handle("/", jr)
+			log.Println("Listening on " + cmdServeAddress)
+			server := http.Server{Addr: cmdServeAddress}
+			go func() {
+				<-ctx.Done()
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				server.Shutdown(ctx)
+				cancel()
+			}()
+			return server.ListenAndServe()
+		},
+	}
 
-	fileSuffix := "-v11"
-	cmd6211 := app.Command("6to11", "convert from Forms v6 to v11").Alias("6211").Alias("convert")
-	upNoTransform := cmd6211.Flag("no-transform", "don't transform").Default("false").Bool()
-	upSrc := cmd6211.Arg("src", "source file").ExistingFile()
-	upDst := cmd6211.Arg("dst", "destination file").String()
-	upSuffix := cmd6211.Flag("suffix", "suffix of converted files").Default(fileSuffix).String()
+	cmdTransform := ff.Command{Name: "transform", ShortHelp: "transform the XML",
+		Usage: "transform <source file> [destination file]",
+		Exec: func(ctx context.Context, args []string) error {
+			tranSrc, tranDst, err := srcDst(args)
+			if err != nil {
+				return err
+			}
+			return transformFiles(tranDst, tranSrc)
+		},
+	}
+
+	FS := ff.NewFlagSet("6to11")
+	upNoTransform := FS.Bool('n', "no-transform", "don't transform")
+	upSuffix := FS.String('S', "suffix", "-v11", "suffix of converted files")
+	cmd6211 := ff.Command{Name: "6to11", Flags: FS,
+		ShortHelp: "convert from Forms v6 to v11",
+		Exec: func(ctx context.Context, args []string) error {
+			upSrc, upDst, err := srcDst(args)
+			if err != nil {
+				return err
+			}
+			ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			err = convertFiles6to11(ctx, converter, upDst, upSrc, !*upNoTransform, *upSuffix)
+			cancel()
+			return err
+		},
+	}
 
 	var watchSrc, watchDst string
-	cmdWatch := app.Command("watch", "watch a directory and transform all appearing files")
-	cmdWatch.Arg("src", "source path to watch").ExistingDirVar(&watchSrc)
-	cmdWatch.Arg("dst", "destination path").ExistingDirVar(&watchDst)
-	cmdWatch.Flag("suffix", "suffix of converted files").Default(fileSuffix).StringVar(&fileSuffix)
-	watchNoTransform := cmdWatch.Flag("no-transform", "don't transform").Default("false").Bool()
-	cmdWatch.Flag("concurrency", "maximum number of conversions running in parallel").Default(strconv.Itoa(concurrency)).IntVar(&concurrency)
-	watchServeAddress := cmdWatch.Flag("http", "HTTP address to listen on").String()
+	FS = ff.NewFlagSet("watch")
+	watchFileSuffix := FS.String('S', "suffix", "-v11", "suffix of converted files")
+	watchNoTransform := FS.BoolDefault('n', "no-transform", false, "don't transform")
+	FS.IntVar(&concurrency, 0, "concurrency", concurrency, "maximum number of conversions running in parallel")
+	watchServeAddress := FS.String(0, "http", "", "HTTP address to listen on")
+	cmdWatch := ff.Command{Name: "watch", Flags: FS,
+		ShortHelp: "watch a directory and transform all appearing files",
+		Exec: func(ctx context.Context, args []string) error {
+			var err error
+			watchSrc, watchDst, err = srcDst(args)
+			if err != nil {
+				return err
+			}
+			http.Handle("/", jr)
+			grp, ctx := errgroup.WithContext(ctx)
+			if *watchServeAddress != "" {
+				grp.Go(func() error {
+					log.Println("Listening on " + *watchServeAddress)
+					return http.ListenAndServe(*watchServeAddress, nil)
+				})
+			}
+			grp.Go(func() error {
+				return watchConvert(ctx, converter, watchDst, watchSrc, !*watchNoTransform, *watchFileSuffix, concurrency)
+			})
+			return grp.Wait()
+		},
+	}
 
-	cmd := kingpin.MustParse(app.Parse(os.Args[1:]))
+	FS = ff.NewFlagSet("forms2xml")
+	FS.StringVar(&jdapiURLs[0], 0, "jdapi-src", jdapiURLs[0], "SRC Form JDAPI helper HTTP listener URL")
+	FS.StringVar(&jdapiURLs[1], 0, "jdapi-dst", jdapiURLs[1], "DEST Form JDAPI helper HTTP listener URL")
+	FS.StringVar(&formsLibPath, 0, "forms.lib.path", formsLibPath, "FORMS_PATH")
+	FS.StringVar(&display, 0, "display", os.Getenv("DISPLAY"), "DISPLAY")
+	app := ff.Command{Name: "forms2xml", Flags: FS,
+		ShortHelp:   "Oracle Forms .fmb <-> .xml with optional conversion",
+		Exec:        cmdXML.Exec,
+		Subcommands: []*ff.Command{&cmdXML, &cmdServe, &cmdTransform, &cmd6211, &cmdWatch},
+	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	if err := app.Parse(os.Args[1:]); err != nil {
+		ffhelp.Command(&app).WriteTo(os.Stderr)
+		if errors.Is(err, ff.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
-	sigCh := make(chan os.Signal, 1)
-	go func() {
-		<-sigCh
-		cancel()
-		time.Sleep(time.Second)
-		os.Exit(1)
-	}()
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
-	jr := newJavaRunner(ctx, jdapiURLs[0], formsLibPath, display, 0, concurrency)
+	jr = newJavaRunner(ctx, jdapiURLs[0], formsLibPath, display, 0, concurrency)
 	jr.MaxRetries = 2
-	converter := Converter(jr)
+	converter = Converter(jr)
 	log.Println("converter:", converter)
 
-	switch cmd {
-	case cmdXML.FullCommand():
-		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err := convertFiles(ctx, converter, *xmlDst, *xmlSrc)
-		cancel()
-		return err
-
-	case cmdServe.FullCommand():
-		http.Handle("/", jr)
-		log.Println("Listening on " + *cmdServeAddress)
-		return http.ListenAndServe(*cmdServeAddress, nil)
-
-	case cmdTransform.FullCommand():
-		return transformFiles(*tranDst, *tranSrc)
-
-	case cmd6211.FullCommand():
-		ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		err := convertFiles6to11(ctx, converter, *upDst, *upSrc, !*upNoTransform, *upSuffix)
-		cancel()
-		return err
-
-	case cmdWatch.FullCommand():
-		http.Handle("/", jr)
-		grp, ctx := errgroup.WithContext(ctx)
-		if *watchServeAddress != "" {
-			grp.Go(func() error {
-				log.Println("Listening on " + *watchServeAddress)
-				return http.ListenAndServe(*watchServeAddress, nil)
-			})
-		}
-		grp.Go(func() error {
-			return watchConvert(ctx, converter, watchDst, watchSrc, !*watchNoTransform, fileSuffix, concurrency)
-		})
-		return grp.Wait()
-	}
-	return nil
+	return app.Run(ctx)
 }
 
 func watchConvert(ctx context.Context, converter Converter, dstDir, srcDir string, doTransform bool, suffix string, concurrency int) error {
 	tokens := make(chan struct{}, concurrency)
 	eventCh := make(chan notify.EventInfo, 16)
 	if err := notify.Watch(srcDir, eventCh, eventsToWatch...); err != nil {
-		return errors.Wrap(err, "watch")
+		return fmt.Errorf("watch: %w", err)
 	}
 	for evt := range eventCh {
 		fn := evt.Path()
@@ -187,7 +229,7 @@ func transformFiles(dst, src string) error {
 	if !(src == "" || src == "-") {
 		var err error
 		if inp, err = os.Open(src); err != nil {
-			return errors.Wrap(err, "open "+src)
+			return fmt.Errorf("open %q: %w", src, err)
 		}
 	}
 	defer inp.Close()
@@ -196,14 +238,14 @@ func transformFiles(dst, src string) error {
 	if !(dst == "" || dst == "-") {
 		var err error
 		if out, err = os.Create(dst); err != nil {
-			return errors.Wrap(err, "create "+dst)
+			return fmt.Errorf("create %q: %w", dst, err)
 		}
 	}
 	defer out.Close()
 
 	var P transform.FormsXMLProcessor
 	if err := P.ProcessStream(out, inp); err != nil {
-		return errors.WithMessage(err, "processStream")
+		return fmt.Errorf("processStream: %w", err)
 	}
 	return out.Close()
 }
@@ -213,27 +255,27 @@ func convertFiles6to11(ctx context.Context, converter Converter, dst, src string
 		dst = strings.TrimSuffix(src, ".fmb") + suffix + ".fmb"
 	}
 	if dst == src {
-		return errors.Wrap(errors.New("overwrite source file"), src)
+		return fmt.Errorf("overwrite source file %q", src)
 	}
 	log.Printf("Convert %q to %q.", src, dst)
 	inp, err := os.Open(src)
 	if err != nil {
-		return errors.Wrap(err, "open "+src)
+		return fmt.Errorf("open %q: %w", src, err)
 	}
 	defer inp.Close()
 	if dfi, err := os.Stat(dst); err == nil {
 		sfi, err := inp.Stat()
 		if err != nil {
-			return errors.Wrap(err, "stat "+dst)
+			return fmt.Errorf("stat %q: %w", dst, err)
 		}
 		if os.SameFile(sfi, dfi) {
-			return errors.Wrap(errors.New("overwrite source file"), sfi.Name())
+			return fmt.Errorf("overwrite source file %q", sfi.Name())
 		}
 	}
 
 	out, err := os.Create(dst)
 	if err != nil {
-		return errors.Wrap(err, "create "+dst)
+		return fmt.Errorf("create %q: %w", dst, err)
 	}
 	defer out.Close()
 	xr, xw := io.Pipe()
@@ -271,23 +313,29 @@ func convertFiles6to11(ctx context.Context, converter Converter, dst, src string
 				err := P.ProcessStream(xmlW, xmlR)
 				log.Printf("xml->xml: %+v", err)
 				tw.CloseWithError(err)
-				return errors.WithMessage(err, "processStream")
+				if err != nil {
+					return fmt.Errorf("processStream: %w", err)
+				}
+				return err
 			})
 		}
 		log.Println("start convert")
 		err := converter.Convert(ctx, out, xmlSource, "application/xml")
 		log.Printf("xml->fmb: %+v", err)
 		xr.CloseWithError(err)
-		return errors.WithMessage(err, "convert")
+		if err != nil {
+			return fmt.Errorf("convert: %w", err)
+		}
+		return nil
 	})
 	err = converter.Convert(ctx, xw, inp, "application/x-oracle-forms")
 	log.Printf("fmb->xml: %+v", err)
 	xw.CloseWithError(err)
 	if err != nil {
-		return errors.WithMessage(err, "convert")
+		return fmt.Errorf("convert: %w", err)
 	}
 	if err = grp.Wait(); err != nil {
-		return errors.WithMessage(err, "convertFiles6to11")
+		return fmt.Errorf("convertFiles6to11: %w", err)
 	}
 	return out.Close()
 }
@@ -303,7 +351,7 @@ func convertFiles(ctx context.Context, converter Converter, dst, src string) err
 	var a [1024]byte
 	n, err := io.ReadAtLeast(inp, a[:], 4)
 	if err != nil {
-		return errors.Wrap(err, "readAtLeast stdin")
+		return fmt.Errorf("readAtLeast stdin: %w", err)
 	}
 	if bytes.HasPrefix(bytes.TrimSpace(a[:n]), []byte("<?xml")) {
 		mimeType = "application/xml"
@@ -319,13 +367,13 @@ func convertFiles(ctx context.Context, converter Converter, dst, src string) err
 	out := os.Stdout
 	if dst != "" && dst != "-" {
 		if out, err = os.Create(dst); err != nil {
-			return errors.Wrap(err, "create "+dst)
+			return fmt.Errorf("create %q: %w", dst, err)
 		}
 		defer out.Close()
 	}
 
 	if err = converter.Convert(ctx, out, inp, mimeType); err != nil {
-		return errors.WithMessage(err, "convertFiles")
+		return fmt.Errorf("convertFiles: %w", err)
 	}
 	return out.Close()
 }
